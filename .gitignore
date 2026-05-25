@@ -1,0 +1,14 @@
+/target/
+data/ivf_index.bin
+data/index.bin
+data/blob.bin
+
+# artefatos locais
+/_ref/
+/versionPython/
+/.study/
+
+# resultados locais de teste (k6)
+test/results*.json
+test/test/results*.json
+test/local-*.json

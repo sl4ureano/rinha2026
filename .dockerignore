@@ -1,0 +1,8 @@
+target/
+.git/
+*.md
+
+# Ignora data/ exceto o índice pré-gerado (evita rebuild de k-means no dev)
+data/*
+!data/.gitkeep
+!data/index.bin

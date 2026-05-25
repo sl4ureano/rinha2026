@@ -1,0 +1,54 @@
+[package]
+name = "fraud-detector"
+version = "0.3.0"
+edition = "2021"
+
+[lib]
+name = "fraud_detector"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+# legacy only: io_uring falha em vários hosts da prova (panic exit 101)
+monoio = { version = "0.2", features = ["legacy", "macros"] }
+memmap2 = "0.9"
+anyhow = "1"
+socket2 = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+flate2 = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
+[[bin]]
+name = "build-index"
+path = "src/bin/build_index.rs"
+
+[[bin]]
+name = "healthcheck"
+path = "src/bin/healthcheck.rs"
+
+[[bin]]
+name = "lb"
+path = "src/lb.rs"
+
+[[bin]]
+name = "verify-fast"
+path = "src/bin/verify_fast.rs"
+
+[[bin]]
+name = "verify-tier"
+path = "src/bin/verify_tier.rs"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+overflow-checks = false
