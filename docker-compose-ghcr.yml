@@ -1,15 +1,7 @@
-# Subir a partir da raiz do repo:
-#   docker compose -f VERSAO-c/docker-compose.yml -p versao-c up --build
-#
-# Benchmark k6 (rede do container lb — ver README):
-#   cd test && k6 run test.js  (com --network container:versao-c-lb-1)
-
 services:
   lb:
-    build:
-      context: ..
-      dockerfile: VERSAO-c/Dockerfile
-    command: ["/app/lb"]
+    image: ghcr.io/sl4ureano/rinha2026:latest
+    command: ["./lb"]
     environment:
       - LB_PORT=9999
       - API1_SOCKET=/tmp/sockets/api1.sock
@@ -36,10 +28,7 @@ services:
       - rinha
 
   api1:
-    build:
-      context: ..
-      dockerfile: VERSAO-c/Dockerfile
-    command: ["/app/server"]
+    image: ghcr.io/sl4ureano/rinha2026:latest
     environment:
       - FD_PASS=1
       - INDEX_PATH=/app/data/index.bin
@@ -66,10 +55,7 @@ services:
       - rinha
 
   api2:
-    build:
-      context: ..
-      dockerfile: VERSAO-c/Dockerfile
-    command: ["/app/server"]
+    image: ghcr.io/sl4ureano/rinha2026:latest
     environment:
       - FD_PASS=1
       - INDEX_PATH=/app/data/index.bin

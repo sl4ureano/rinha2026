@@ -6,6 +6,8 @@ services:
       - LB_PORT=9999
       - API1_SOCKET=/tmp/sockets/api1.sock
       - API2_SOCKET=/tmp/sockets/api2.sock
+    ports:
+      - "9999:9999"
     depends_on:
       api1:
         condition: service_healthy
@@ -13,14 +15,15 @@ services:
         condition: service_healthy
     volumes:
       - sockets:/tmp/sockets
-    cpus: 0.10
-    mem_limit: 8m
-    memswap_limit: 8m
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     deploy:
       resources:
         limits:
-          cpus: "0.10"
-          memory: 8M
+          cpus: "0.20"
+          memory: 20M
     networks:
       - rinha
 
@@ -40,14 +43,15 @@ services:
       start_period: 15s
     volumes:
       - sockets:/tmp/sockets
-    cpus: 0.45
-    mem_limit: 169m
-    memswap_limit: 169m
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     deploy:
       resources:
         limits:
-          cpus: "0.45"
-          memory: 169M
+          cpus: "0.40"
+          memory: 165M
     networks:
       - rinha
 
@@ -67,14 +71,15 @@ services:
       start_period: 15s
     volumes:
       - sockets:/tmp/sockets
-    cpus: 0.45
-    mem_limit: 169m
-    memswap_limit: 169m
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     deploy:
       resources:
         limits:
-          cpus: "0.45"
-          memory: 169M
+          cpus: "0.40"
+          memory: 165M
     networks:
       - rinha
 
@@ -89,4 +94,3 @@ volumes:
 networks:
   rinha:
     driver: bridge
-
