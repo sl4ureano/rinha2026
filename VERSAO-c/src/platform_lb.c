@@ -3,25 +3,153 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/epoll.h>
 #include <sys/socket.h>
+#include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
-extern int scm_connect_unix_retry(const char *path);
-extern int scm_send_fd(int ctrl_fd, int client_fd);
-extern void scm_set_nonblocking(int fd);
+#define MAX_UPSTREAMS 16
+#define BACKLOG 65535
+
 extern void scm_set_tcp_nodelay(int fd);
 extern void scm_write_502(int fd);
 
-static int tcp_listen(uint16_t port)
+typedef struct {
+    char path[256];
+    int fd;
+} upstream_t;
+
+static upstream_t upstreams[MAX_UPSTREAMS];
+static int upstream_count = 0;
+static uint32_t rr_next = 0;
+
+static void sleep_ms(long ms)
+{
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000L;
+    while (nanosleep(&ts, &ts) < 0 && errno == EINTR) {}
+}
+
+static int connect_once(const char *path)
+{
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int connect_wait(const char *path)
+{
+    for (;;) {
+        int fd = connect_once(path);
+        if (fd >= 0) return fd;
+        sleep_ms(5);
+    }
+}
+
+static int reconnect_one(int idx)
+{
+    if (upstreams[idx].fd >= 0) close(upstreams[idx].fd);
+    upstreams[idx].fd = -1;
+    for (int tries = 0; tries < 20; tries++) {
+        int fd = connect_once(upstreams[idx].path);
+        if (fd >= 0) {
+            upstreams[idx].fd = fd;
+            return 0;
+        }
+        sleep_ms(2);
+    }
+    return -1;
+}
+
+static char s_byte;
+static struct iovec s_iov = {.iov_base = &s_byte, .iov_len = 1};
+static union {
+    char buf[CMSG_SPACE(sizeof(int))];
+    struct cmsghdr align;
+} s_control;
+static struct msghdr s_msg;
+static int s_fd_init_done;
+
+static void init_send_fd(void)
+{
+    s_msg.msg_iov = &s_iov;
+    s_msg.msg_iovlen = 1;
+    s_msg.msg_control = s_control.buf;
+    s_msg.msg_controllen = sizeof(s_control.buf);
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&s_msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    s_fd_init_done = 1;
+}
+
+static int send_fd_once(int ctrl_fd, int client_fd)
+{
+    if (__builtin_expect(!s_fd_init_done, 0)) init_send_fd();
+    memcpy(CMSG_DATA(CMSG_FIRSTHDR(&s_msg)), &client_fd, sizeof(client_fd));
+    for (;;) {
+        ssize_t n = sendmsg(ctrl_fd, &s_msg, MSG_NOSIGNAL);
+        if (n == 1) return 0;
+        if (n < 0 && errno == EINTR) continue;
+        return -1;
+    }
+}
+
+static int handoff(int idx, int client_fd)
+{
+    if (upstreams[idx].fd < 0 && reconnect_one(idx) != 0) return -1;
+    if (send_fd_once(upstreams[idx].fd, client_fd) == 0) return 0;
+    if (reconnect_one(idx) != 0) return -1;
+    return send_fd_once(upstreams[idx].fd, client_fd);
+}
+
+static void add_upstream(const char *path, size_t len)
+{
+    while (len > 0 && (*path == ' ' || *path == '\t')) { path++; len--; }
+    while (len > 0 && (path[len - 1] == ' ' || path[len - 1] == '\t' || path[len - 1] == '\n')) len--;
+    if (len == 0 || upstream_count >= MAX_UPSTREAMS) return;
+    upstream_t *u = &upstreams[upstream_count++];
+    memset(u, 0, sizeof(*u));
+    if (len >= sizeof(u->path)) len = sizeof(u->path) - 1;
+    memcpy(u->path, path, len);
+    u->path[len] = '\0';
+    u->fd = -1;
+}
+
+static void parse_upstreams(const char *csv)
+{
+    const char *start = csv;
+    for (const char *p = csv;; p++) {
+        if (*p == ',' || *p == '\0') {
+            add_upstream(start, (size_t)(p - start));
+            if (*p == '\0') break;
+            start = p + 1;
+        }
+    }
+}
+
+static int listen_tcp(uint16_t port)
 {
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) return -1;
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
+
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
         .sin_port = htons(port),
@@ -31,61 +159,51 @@ static int tcp_listen(uint16_t port)
         close(fd);
         return -1;
     }
-    if (listen(fd, 16384) < 0) {
+    if (listen(fd, BACKLOG) < 0) {
         close(fd);
         return -1;
     }
-    scm_set_nonblocking(fd);
     return fd;
 }
 
-int run_lb(uint16_t port, const char *api1_sock, const char *api2_sock)
+int run_lb(uint16_t port, const char *upstreams_csv)
 {
-    int ctrl1 = scm_connect_unix_retry(api1_sock);
-    int ctrl2 = scm_connect_unix_retry(api2_sock);
-    if (ctrl1 < 0 || ctrl2 < 0) {
-        fprintf(stderr, "lb: failed to connect upstream uds\n");
+    signal(SIGPIPE, SIG_IGN);
+
+    parse_upstreams(upstreams_csv);
+    if (upstream_count == 0) {
+        fprintf(stderr, "lb: no upstreams configured\n");
         return 1;
     }
+    fprintf(stderr, "lb: %d upstreams configured\n", upstream_count);
 
-    int listen_fd = tcp_listen(port);
+    for (int i = 0; i < upstream_count; i++) {
+        upstreams[i].fd = connect_wait(upstreams[i].path);
+        fprintf(stderr, "lb: connected upstream %d -> %s\n", i, upstreams[i].path);
+    }
+
+    int listen_fd = listen_tcp(port);
     if (listen_fd < 0) {
-        fprintf(stderr, "lb: listen failed\n");
+        fprintf(stderr, "lb: listen failed on port %u\n", port);
         return 1;
     }
-    scm_set_nonblocking(listen_fd);
-
-    int epfd = epoll_create1(EPOLL_CLOEXEC);
-    struct epoll_event ev = {.events = EPOLLIN | EPOLLET, .data.fd = listen_fd};
-    epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev);
-
-    struct epoll_event events[256];
-    int ctrl[2] = {ctrl1, ctrl2};
-    int next = 0;
+    fprintf(stderr, "lb: listening on port %u (backlog=%d, upstreams=%d)\n",
+            port, BACKLOG, upstream_count);
 
     for (;;) {
-        int n = epoll_wait(epfd, events, 256, -1);
-        if (n < 0) {
+        int client = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
+        if (client < 0) {
             if (errno == EINTR) continue;
-            break;
+            continue;
         }
-        for (int i = 0; i < n; i++) {
-            if (!(events[i].events & EPOLLIN)) continue;
-            for (;;) {
-                int client = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
-                if (client < 0) {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-                    if (errno == EINTR) continue;
-                    break;
-                }
-                scm_set_tcp_nodelay(client);
-                int primary = next;
-                next ^= 1;
-                if (!scm_send_fd(ctrl[primary], client) && !scm_send_fd(ctrl[primary ^ 1], client))
-                    scm_write_502(client);
-                close(client);
+        scm_set_tcp_nodelay(client);
+        int first = (int)(rr_next++ % (uint32_t)upstream_count);
+        if (handoff(first, client) != 0) {
+            for (int offset = 1; offset < upstream_count; offset++) {
+                if (handoff((first + offset) % upstream_count, client) == 0) break;
             }
         }
+        close(client);
     }
     return 0;
 }

@@ -72,18 +72,38 @@ impl ServerConfig {
 #[derive(Debug, Clone)]
 pub struct LbConfig {
     pub port: u16,
-    pub api1_socket: String,
-    pub api2_socket: String,
+    pub upstreams: Vec<String>,
 }
 
 impl LbConfig {
     pub fn from_env() -> Self {
-        Self {
-            port: env_trim_or("LB_PORT", "9999")
+        let port: u16 = env_trim_or("LB_PORT", "9999")
+            .parse()
+            .expect("LB_PORT");
+
+        let upstreams = if let Some(csv) = env_trim("UPSTREAMS") {
+            csv.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        } else {
+            let api1 = env_trim_or("API1_SOCKET", "/tmp/sockets/api1.sock");
+            let api2 = env_trim_or("API2_SOCKET", "/tmp/sockets/api2.sock");
+            let channels: usize = env_trim_or("CHANNELS_PER_API", "4")
                 .parse()
-                .expect("LB_PORT"),
-            api1_socket: env_trim_or("API1_SOCKET", "/tmp/sockets/api1.sock"),
-            api2_socket: env_trim_or("API2_SOCKET", "/tmp/sockets/api2.sock"),
-        }
+                .unwrap_or(4)
+                .max(1)
+                .min(8);
+            let mut v = Vec::with_capacity(channels * 2);
+            for _ in 0..channels {
+                v.push(api1.clone());
+            }
+            for _ in 0..channels {
+                v.push(api2.clone());
+            }
+            v
+        };
+
+        Self { port, upstreams }
     }
 }

@@ -1,90 +1,113 @@
-//! Single-thread epoll load balancer: accepts TCP and passes FDs to API workers.
+//! Single-thread blocking-accept load balancer with multiple upstreams.
 
 use std::os::fd::RawFd;
 
 use crate::config::LbConfig;
-use crate::platform::scm::{connect_unix_retry, send_fd, set_nonblocking, set_tcp_nodelay, write_502};
+use crate::platform::scm::{connect_unix_retry, connect_unix_once, send_fd, set_tcp_nodelay};
+
+const BACKLOG: libc::c_int = 65535;
+
+struct Upstream {
+    path: String,
+    fd: RawFd,
+}
+
+impl Upstream {
+    fn reconnect(&mut self) -> bool {
+        if self.fd >= 0 {
+            unsafe { libc::close(self.fd) };
+            self.fd = -1;
+        }
+        for _ in 0..20 {
+            match connect_unix_once(&self.path) {
+                Ok(fd) => {
+                    self.fd = fd;
+                    return true;
+                }
+                Err(_) => {
+                    let ts = libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 2_000_000,
+                    };
+                    unsafe { libc::nanosleep(&ts, std::ptr::null_mut()) };
+                }
+            }
+        }
+        false
+    }
+}
+
+fn handoff(upstream: &mut Upstream, client_fd: RawFd) -> bool {
+    if upstream.fd < 0 && !upstream.reconnect() {
+        return false;
+    }
+    if send_fd(upstream.fd, client_fd) {
+        return true;
+    }
+    if !upstream.reconnect() {
+        return false;
+    }
+    send_fd(upstream.fd, client_fd)
+}
 
 pub fn run(cfg: LbConfig) {
-    let ctrl1 = connect_unix_retry(&cfg.api1_socket);
-    let ctrl2 = connect_unix_retry(&cfg.api2_socket);
-    eprintln!("lb epoll :{} upstreams ready", cfg.port);
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+
+    assert!(!cfg.upstreams.is_empty(), "lb: no upstreams configured");
+
+    let mut upstreams: Vec<Upstream> = cfg
+        .upstreams
+        .iter()
+        .map(|path| {
+            let fd = connect_unix_retry(path);
+            eprintln!("lb: connected upstream -> {path}");
+            Upstream {
+                path: path.clone(),
+                fd,
+            }
+        })
+        .collect();
+
+    let upstream_count = upstreams.len();
+    eprintln!("lb: {} upstreams configured", upstream_count);
 
     let listen_fd = tcp_listen(cfg.port).expect("listen");
-    set_nonblocking(listen_fd);
-    let epfd = epoll_create().expect("epoll_create");
-    epoll_add(epfd, listen_fd).expect("epoll_add");
+    eprintln!(
+        "lb: listening on port {} (backlog={}, upstreams={})",
+        cfg.port, BACKLOG, upstream_count
+    );
 
-    let mut events = [libc::epoll_event { events: 0, u64: 0 }; 64];
-    let mut next_upstream: usize = 0;
-    let ctrl = [ctrl1, ctrl2];
+    let mut rr_next: u32 = 0;
 
     loop {
-        let n = unsafe {
-            libc::epoll_wait(epfd, events.as_mut_ptr(), events.len() as i32, -1)
+        let client = unsafe {
+            libc::accept4(
+                listen_fd,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                libc::SOCK_CLOEXEC,
+            )
         };
-        if n < 0 {
-            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+        if client < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            break;
+            continue;
         }
-        for i in 0..n as usize {
-            if (events[i].events & libc::EPOLLIN as u32) == 0 {
-                continue;
-            }
-            loop {
-                let client = unsafe {
-                    libc::accept4(
-                        listen_fd,
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        libc::SOCK_CLOEXEC,
-                    )
-                };
-                if client < 0 {
-                    let err = std::io::Error::last_os_error();
-                    if err.kind() == std::io::ErrorKind::WouldBlock
-                        || err.raw_os_error() == Some(libc::EAGAIN)
-                    {
-                        break;
-                    }
-                    if err.kind() == std::io::ErrorKind::Interrupted {
-                        continue;
-                    }
+        set_tcp_nodelay(client);
+
+        let first = (rr_next % upstream_count as u32) as usize;
+        rr_next = rr_next.wrapping_add(1);
+
+        if !handoff(&mut upstreams[first], client) {
+            for offset in 1..upstream_count {
+                if handoff(&mut upstreams[(first + offset) % upstream_count], client) {
                     break;
                 }
-                set_tcp_nodelay(client);
-                let primary = next_upstream;
-                next_upstream ^= 1;
-                if !send_fd(ctrl[primary], client) && !send_fd(ctrl[primary ^ 1], client) {
-                    write_502(client);
-                }
-                unsafe { libc::close(client) };
             }
         }
-    }
-}
-
-fn epoll_create() -> std::io::Result<RawFd> {
-    let fd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
-    if fd < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(fd)
-    }
-}
-
-fn epoll_add(epfd: RawFd, fd: RawFd) -> std::io::Result<()> {
-    let mut ev = libc::epoll_event {
-        events: libc::EPOLLIN as u32,
-        u64: fd as u64,
-    };
-    let r = unsafe { libc::epoll_ctl(epfd, libc::EPOLL_CTL_ADD, fd, &mut ev) };
-    if r != 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
+        unsafe { libc::close(client) };
     }
 }
 
@@ -99,6 +122,13 @@ fn tcp_listen(port: u16) -> std::io::Result<RawFd> {
             sock,
             libc::SOL_SOCKET,
             libc::SO_REUSEADDR,
+            &one as *const _ as *const _,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+        libc::setsockopt(
+            sock,
+            libc::SOL_SOCKET,
+            libc::SO_REUSEPORT,
             &one as *const _ as *const _,
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         );
@@ -119,7 +149,7 @@ fn tcp_listen(port: u16) -> std::io::Result<RawFd> {
         unsafe { libc::close(sock) };
         return Err(e);
     }
-    if unsafe { libc::listen(sock, 16384) } != 0 {
+    if unsafe { libc::listen(sock, BACKLOG) } != 0 {
         let e = std::io::Error::last_os_error();
         unsafe { libc::close(sock) };
         return Err(e);

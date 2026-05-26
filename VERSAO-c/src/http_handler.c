@@ -16,7 +16,7 @@ static int write_all(int fd, const uint8_t *buf, size_t len)
 {
     size_t off = 0;
     while (off < len) {
-        ssize_t n = write(fd, buf + off, len - off);
+        ssize_t n = send(fd, buf + off, len - off, MSG_NOSIGNAL);
         if (n <= 0) return -1;
         off += (size_t)n;
     }
@@ -30,84 +30,31 @@ static inline int write_resp(int fd, const uint8_t *buf, size_t len)
 
 static int find_double_crlf(const uint8_t *buf, size_t len, size_t *out)
 {
-    if (len < 4) return 0;
-    for (size_t i = 0; i + 4 <= len; i++) {
-        uint32_t w = (uint32_t)buf[i] | ((uint32_t)buf[i + 1] << 8) |
-                     ((uint32_t)buf[i + 2] << 16) | ((uint32_t)buf[i + 3] << 24);
-        if (w == 0x0a0d0a0du) {
-            *out = i + 4;
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static int memchr_crlf(const uint8_t *buf, size_t len, size_t *out)
-{
-    for (size_t i = 0; i + 1 < len; i++) {
-        if (buf[i] == '\r' && buf[i + 1] == '\n') {
-            *out = i;
-            return 1;
-        }
-    }
-    return 0;
+    static const char pat[] = "\r\n\r\n";
+    const void *p = memmem(buf, len, pat, 4);
+    if (!p) return 0;
+    *out = (size_t)((const uint8_t *)p - buf) + 4;
+    return 1;
 }
 
 static int content_length_fast(const uint8_t *hdr, size_t hlen, int *cl)
 {
     static const char tag[] = "\r\nContent-Length: ";
     enum { TAG_LEN = sizeof(tag) - 1 };
-
-    if (hlen < TAG_LEN + 1) return 0;
-    for (size_t i = 0; i + TAG_LEN <= hlen; i++) {
-        if (memcmp(hdr + i, tag, TAG_LEN) != 0) continue;
-        size_t start = i + TAG_LEN;
-        size_t end = start;
-        while (end < hlen && hdr[end] >= '0' && hdr[end] <= '9') end++;
-        if (end == start) return 0;
-        int n = 0;
-        for (size_t j = start; j < end; j++) n = n * 10 + (hdr[j] - '0');
-        *cl = n;
-        return 1;
+    const void *p = memmem(hdr, hlen, tag, TAG_LEN);
+    if (!p) {
+        static const char tag2[] = "\r\ncontent-length: ";
+        p = memmem(hdr, hlen, tag2, TAG_LEN);
     }
-    static const char tag2[] = "\r\ncontent-length: ";
-    enum { TAG2_LEN = sizeof(tag2) - 1 };
-    for (size_t i = 0; i + TAG2_LEN <= hlen; i++) {
-        if (memcmp(hdr + i, tag2, TAG2_LEN) != 0) continue;
-        size_t start = i + TAG2_LEN;
-        size_t end = start;
-        while (end < hlen && hdr[end] >= '0' && hdr[end] <= '9') end++;
-        if (end == start) return 0;
-        int n = 0;
-        for (size_t j = start; j < end; j++) n = n * 10 + (hdr[j] - '0');
-        *cl = n;
-        return 1;
-    }
-    return 0;
-}
-
-static int parse_request_line(const uint8_t *line, size_t len, size_t *m_end, size_t *p_end)
-{
-    size_t sp1 = (size_t)-1;
-    for (size_t i = 0; i < len; i++) {
-        if (line[i] == ' ') {
-            sp1 = i;
-            break;
-        }
-    }
-    if (sp1 == (size_t)-1) return 0;
-    const uint8_t *rest = line + sp1 + 1;
-    size_t rlen = len - sp1 - 1;
-    size_t sp2 = (size_t)-1;
-    for (size_t i = 0; i < rlen; i++) {
-        if (rest[i] == ' ') {
-            sp2 = i;
-            break;
-        }
-    }
-    if (sp2 == (size_t)-1) return 0;
-    *m_end = sp1;
-    *p_end = sp2;
+    if (!p) return 0;
+    const uint8_t *start = (const uint8_t *)p + TAG_LEN;
+    const uint8_t *end = start;
+    const uint8_t *limit = hdr + hlen;
+    while (end < limit && *end >= '0' && *end <= '9') end++;
+    if (end == start) return 0;
+    int n = 0;
+    for (const uint8_t *j = start; j < end; j++) n = n * 10 + (*j - '0');
+    *cl = n;
     return 1;
 }
 
@@ -127,7 +74,7 @@ static handle_outcome_t try_handle_one(int fd, const index_t *idx, const uint8_t
     size_t header_end;
     if (!find_double_crlf(buf, len, &header_end)) return NEED_MORE;
 
-    if (len >= 21 && memcmp(buf, "POST /fraud-score HTTP", 21) == 0) {
+    if (__builtin_expect(len >= 21 && memcmp(buf, "POST /fraud-score HTTP", 21) == 0, 1)) {
         int cl;
         if (!content_length_fast(buf, header_end, &cl)) {
             write_resp(fd, RESP_DENIED_S10, RESP_DENIED_S10_LEN);
@@ -141,37 +88,9 @@ static handle_outcome_t try_handle_one(int fd, const index_t *idx, const uint8_t
         return CONSUMED_OK;
     }
 
-    size_t req_line_end;
-    if (!memchr_crlf(buf, len, &req_line_end)) return NEED_MORE;
-    size_t m_end, p_end;
-    if (!parse_request_line(buf, req_line_end, &m_end, &p_end)) {
-        write_resp(fd, RESP_DENIED_S10, RESP_DENIED_S10_LEN);
-        *consumed = header_end;
-        return CONSUMED_OK;
-    }
-
-    int is_get = (m_end == 3 && memcmp(buf, "GET", 3) == 0);
-    int is_post = (m_end == 4 && memcmp(buf, "POST", 4) == 0);
-    const uint8_t *path = buf + m_end + 1;
-    size_t plen = p_end;
-
-    if (is_get && plen == 6 && memcmp(path, "/ready", 6) == 0) {
+    if (len >= 10 && memcmp(buf, "GET /ready", 10) == 0) {
         write_resp(fd, RESP_READY, RESP_READY_LEN);
         *consumed = header_end;
-        return CONSUMED_OK;
-    }
-
-    if (is_post && plen == 12 && memcmp(path, "/fraud-score", 12) == 0) {
-        int cl;
-        if (!content_length_fast(buf, header_end, &cl)) {
-            write_resp(fd, RESP_DENIED_S10, RESP_DENIED_S10_LEN);
-            *consumed = header_end;
-            return CONSUMED_OK;
-        }
-        if (len < header_end + (size_t)cl) return NEED_MORE;
-        uint8_t fc = fraud_count_from_body(idx, buf + header_end, (size_t)cl);
-        write_resp(fd, resp_for_count(fc), resp_len_for_count(fc));
-        *consumed = header_end + (size_t)cl;
         return CONSUMED_OK;
     }
 
@@ -182,47 +101,41 @@ static handle_outcome_t try_handle_one(int fd, const index_t *idx, const uint8_t
 
 void serve_connection(int fd, const index_t *idx)
 {
-    int one = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-
-    uint8_t *req_buf = NULL;
-    size_t req_len = 0, req_cap = 4096;
-    req_buf = malloc(req_cap);
-    if (!req_buf) {
-        close(fd);
-        return;
-    }
-    uint8_t read_buf[8192];
+    uint8_t stack_buf[4096];
+    uint8_t *req_buf = stack_buf;
+    size_t req_len = 0, req_cap = sizeof(stack_buf);
+    int heap = 0;
 
     for (;;) {
-        ssize_t n = read(fd, read_buf, sizeof(read_buf));
+        if (req_len == req_cap) {
+            if (req_cap >= REQ_CAP) {
+                write_resp(fd, RESP_DENIED_S10, RESP_DENIED_S10_LEN);
+                if (heap) free(req_buf);
+                close(fd);
+                return;
+            }
+            size_t nc = req_cap * 2;
+            if (nc > REQ_CAP) nc = REQ_CAP;
+            if (!heap) {
+                uint8_t *p = malloc(nc);
+                if (!p) { close(fd); return; }
+                memcpy(p, req_buf, req_len);
+                req_buf = p;
+                heap = 1;
+            } else {
+                uint8_t *p = realloc(req_buf, nc);
+                if (!p) { free(req_buf); close(fd); return; }
+                req_buf = p;
+            }
+            req_cap = nc;
+        }
+
+        ssize_t n = recv(fd, req_buf + req_len, req_cap - req_len, MSG_NOSIGNAL);
         if (n <= 0) {
-            free(req_buf);
+            if (heap) free(req_buf);
             close(fd);
             return;
         }
-        if (req_len + (size_t)n > req_cap) {
-            if (req_len + (size_t)n > REQ_CAP) {
-                write_resp(fd, RESP_DENIED_S10, RESP_DENIED_S10_LEN);
-                free(req_buf);
-                close(fd);
-                return;
-            }
-            size_t nc = req_cap;
-            while (nc < req_len + (size_t)n) {
-                nc *= 2;
-                if (nc > REQ_CAP) nc = REQ_CAP;
-            }
-            uint8_t *p = realloc(req_buf, nc);
-            if (!p) {
-                free(req_buf);
-                close(fd);
-                return;
-            }
-            req_buf = p;
-            req_cap = nc;
-        }
-        memcpy(req_buf + req_len, read_buf, (size_t)n);
         req_len += (size_t)n;
 
         for (;;) {
@@ -231,18 +144,20 @@ void serve_connection(int fd, const index_t *idx)
             if (o == NEED_MORE) break;
             if (o == DROP_CONN) {
                 write_resp(fd, RESP_DENIED_S10, RESP_DENIED_S10_LEN);
-                free(req_buf);
+                if (heap) free(req_buf);
                 close(fd);
                 return;
             }
             if (consumed > req_len) {
-                free(req_buf);
+                if (heap) free(req_buf);
                 close(fd);
                 return;
             }
-            memmove(req_buf, req_buf + consumed, req_len - consumed);
             req_len -= consumed;
-            if (req_len == 0) break;
+            if (req_len > 0)
+                memmove(req_buf, req_buf + consumed, req_len);
+            else
+                break;
         }
     }
 }

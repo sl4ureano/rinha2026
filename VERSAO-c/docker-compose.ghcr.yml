@@ -6,8 +6,7 @@ services:
       - LB_PORT=9999
       - API1_SOCKET=/tmp/sockets/api1.sock
       - API2_SOCKET=/tmp/sockets/api2.sock
-    ports:
-      - "9999:9999"
+      - CHANNELS_PER_API=4
     depends_on:
       api1:
         condition: service_healthy
@@ -39,8 +38,8 @@ services:
       test: ["CMD", "/app/healthcheck"]
       interval: 1s
       timeout: 1s
-      retries: 30
-      start_period: 15s
+      retries: 60
+      start_period: 30s
     volumes:
       - sockets:/tmp/sockets
     ulimits:
@@ -67,8 +66,8 @@ services:
       test: ["CMD", "/app/healthcheck"]
       interval: 1s
       timeout: 1s
-      retries: 30
-      start_period: 15s
+      retries: 60
+      start_period: 30s
     volumes:
       - sockets:/tmp/sockets
     ulimits:
@@ -94,3 +93,4 @@ volumes:
 networks:
   rinha:
     driver: bridge
+

@@ -14,48 +14,31 @@
 
 extern int scm_recv_fd(int control_fd);
 extern int scm_recv_fd_nonblock(int control_fd);
-extern void scm_set_tcp_nodelay(int fd);
 
-typedef struct {
-    const index_t *idx;
-    int fd;
-} conn_arg_t;
+static const index_t *g_idx;
 
 typedef struct {
     int control_fd;
-    const index_t *idx;
 } control_ctx_t;
 
 static void *conn_thread(void *arg)
 {
-    conn_arg_t *a = (conn_arg_t *)arg;
-    serve_connection(a->fd, a->idx);
-    free(a);
+    int fd = (int)(intptr_t)arg;
+    serve_connection(fd, g_idx);
     return NULL;
 }
 
-static void spawn_conn(const index_t *idx, int fd)
+static pthread_attr_t g_conn_attr;
+
+static void spawn_conn(int fd)
 {
-    conn_arg_t *a = malloc(sizeof(*a));
-    if (!a) {
-        close(fd);
-        return;
-    }
-    a->idx = idx;
-    a->fd = fd;
     pthread_t t;
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    pthread_attr_setstacksize(&attr, 256 * 1024);
-    if (pthread_create(&t, &attr, conn_thread, a) != 0) {
+    if (pthread_create(&t, &g_conn_attr, conn_thread, (void *)(intptr_t)fd) != 0) {
         close(fd);
-        free(a);
     }
-    pthread_attr_destroy(&attr);
 }
 
-static void recv_loop_fixed(int control_fd, const index_t *idx)
+static void recv_loop_fixed(int control_fd)
 {
     for (;;) {
         int fd = scm_recv_fd(control_fd);
@@ -63,13 +46,11 @@ static void recv_loop_fixed(int control_fd, const index_t *idx)
             close(control_fd);
             return;
         }
-        scm_set_tcp_nodelay(fd);
-        spawn_conn(idx, fd);
+        spawn_conn(fd);
         for (;;) {
             int fd2 = scm_recv_fd_nonblock(control_fd);
             if (fd2 < 0) break;
-            scm_set_tcp_nodelay(fd2);
-            spawn_conn(idx, fd2);
+            spawn_conn(fd2);
         }
     }
 }
@@ -77,13 +58,18 @@ static void recv_loop_fixed(int control_fd, const index_t *idx)
 static void *control_thread(void *arg)
 {
     control_ctx_t *ctx = (control_ctx_t *)arg;
-    recv_loop_fixed(ctx->control_fd, ctx->idx);
+    recv_loop_fixed(ctx->control_fd);
     free(ctx);
     return NULL;
 }
 
 int fd_gateway_run(const index_t *idx, const char *sock_path)
 {
+    g_idx = idx;
+    pthread_attr_init(&g_conn_attr);
+    pthread_attr_setdetachstate(&g_conn_attr, PTHREAD_CREATE_DETACHED);
+    pthread_attr_setstacksize(&g_conn_attr, 64 * 1024);
+
     char parent[512];
     strncpy(parent, sock_path, sizeof(parent) - 1);
     parent[sizeof(parent) - 1] = '\0';
@@ -127,7 +113,6 @@ int fd_gateway_run(const index_t *idx, const char *sock_path)
             continue;
         }
         ctx->control_fd = control;
-        ctx->idx = idx;
         pthread_t t;
         if (pthread_create(&t, NULL, control_thread, ctx) != 0) {
             close(control);
