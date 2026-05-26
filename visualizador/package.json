@@ -1,0 +1,14 @@
+{
+  "name": "rinha-flow-visualizador",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Visualização 3D em tempo real do fluxo POST /fraud-score",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

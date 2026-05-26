@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rinha Flow — visualizador 3D</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Outfit:wght@400;600;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/css/style.css" />
+  </head>
+  <body>
+    <div id="canvas-wrap"></div>
+
+    <header class="hud top">
+      <div class="brand">
+        <span class="logo">⚡</span>
+        <div>
+          <h1>Rinha Flow</h1>
+          <p>POST /fraud-score em 3D — tempo real</p>
+        </div>
+      </div>
+      <div class="status-pills">
+        <span id="api-status" class="pill warn">API: verificando…</span>
+        <span id="sse-status" class="pill">SSE: …</span>
+      </div>
+    </header>
+
+    <aside class="panel left">
+      <h2>Enviar transação</h2>
+      <label for="payload">JSON da transação</label>
+      <textarea id="payload" spellcheck="false"></textarea>
+      <div class="btn-row">
+        <button id="btn-send" class="primary">Enviar (API real + trace)</button>
+        <button id="btn-sim" class="ghost">Só simular</button>
+      </div>
+      <label for="examples">Exemplos</label>
+      <select id="examples"></select>
+      <p class="hint">
+        Com <code>docker compose up</code>, a API fica em <code>:9999</code>. O visualizador replica o
+        <code>tier_score</code> em JS e mostra o caminho (atalho, árvore ou ratio).
+      </p>
+    </aside>
+
+    <aside class="panel right" id="metrics-panel">
+      <h2>Última request</h2>
+      <div id="metrics-empty" class="empty">Envie uma transação para ver o fluxo animado.</div>
+      <div id="metrics" class="hidden">
+        <div class="metric-hero" id="path-badge"></div>
+        <dl class="metrics-grid">
+          <dt>API (round-robin)</dt>
+          <dd id="m-api">—</dd>
+          <dt>Camada</dt>
+          <dd id="m-path">—</dd>
+          <dt>fraud_count</dt>
+          <dd id="m-count">—</dd>
+          <dt>Resposta</dt>
+          <dd id="m-response">—</dd>
+          <dt>Latência trace</dt>
+          <dd id="m-trace-ms">—</dd>
+          <dt>Latência API</dt>
+          <dd id="m-proxy-ms">—</dd>
+          <dt>Match API ↔ trace</dt>
+          <dd id="m-match">—</dd>
+        </dl>
+        <div id="checks-block"></div>
+        <div id="tree-block" class="hidden"></div>
+      </div>
+    </aside>
+
+    <footer class="hud bottom">
+      <span id="legend"></span>
+      <span class="credit">Integrado ao projeto Rinha 2026 — fraud-detector</span>
+    </footer>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+        }
+      }
+    </script>
+    <script type="module" src="/js/app.js"></script>
+  </body>
+</html>
