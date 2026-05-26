@@ -451,21 +451,6 @@ export function createScene(wrap) {
   const particleLight = new THREE.PointLight(0xffffff, 2.5, 8, 2);
   particleGroup.add(particleLight);
 
-  const trailGeo = new THREE.BufferGeometry();
-  const trailMax = 100;
-  const trailPositions = new Float32Array(trailMax * 3);
-  trailGeo.setAttribute("position", new THREE.BufferAttribute(trailPositions, 3));
-  const trail = new THREE.Line(
-    trailGeo,
-    new THREE.LineBasicMaterial({
-      color: 0x38bdf8,
-      transparent: true,
-      opacity: 0.7,
-      blending: THREE.AdditiveBlending,
-    }),
-  );
-  scene.add(trail);
-  let trailIdx = 0;
   let flowAnim = null;
   const clock = new THREE.Clock();
 
@@ -572,7 +557,6 @@ export function createScene(wrap) {
 
     let step = 0;
     let t = 0;
-    trailIdx = 0;
 
     function tick() {
       t += 0.018;
@@ -588,15 +572,6 @@ export function createScene(wrap) {
       const eased = easeInOutCubic(t);
       particleGroup.position.lerpVectors(points[step], points[step + 1], eased);
       particleGroup.rotation.y += 0.12;
-
-      const i = trailIdx % trailMax;
-      trailPositions[i * 3] = particleGroup.position.x;
-      trailPositions[i * 3 + 1] = particleGroup.position.y + 0.15;
-      trailPositions[i * 3 + 2] = particleGroup.position.z;
-      trailIdx++;
-      trailGeo.attributes.position.needsUpdate = true;
-      trail.geometry.setDrawRange(0, Math.min(trailIdx, trailMax));
-
       particleLight.intensity = 1.5 + eased * 1.2;
       flowAnim = { raf: requestAnimationFrame(tick) };
     }
