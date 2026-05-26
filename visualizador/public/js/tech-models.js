@@ -446,7 +446,7 @@ export function buildDataPacket(color = 0xffffff) {
   return g;
 }
 
-/** Chão estilo PCB — quadrado centralizado no layout */
+/** Chão simples — superfície escura sem grade/trilhas */
 export function buildPcbFloor(centerX = 0, centerZ = 0) {
   const g = new THREE.Group();
   const sizeX = 44;
@@ -454,40 +454,15 @@ export function buildPcbFloor(centerX = 0, centerZ = 0) {
   const base = new THREE.Mesh(
     new THREE.PlaneGeometry(sizeX, sizeZ),
     new THREE.MeshStandardMaterial({
-      color: 0x152040,
-      emissive: 0x1e3a5f,
-      emissiveIntensity: 0.14,
-      metalness: 0.88,
-      roughness: 0.38,
+      color: 0x0f172a,
+      emissive: 0x0c1428,
+      emissiveIntensity: 0.08,
+      metalness: 0.6,
+      roughness: 0.55,
     }),
   );
   base.rotation.x = -Math.PI / 2;
   base.position.set(centerX, -1.35, centerZ);
-
-  const grid = new THREE.GridHelper(sizeX, 22, 0x3b82f6, 0x1e3a5f);
-  grid.position.set(centerX, -1.34, centerZ);
-  grid.material.opacity = 0.38;
-  grid.material.transparent = true;
-
-  const traces = new THREE.Group();
-  const traceMat = new THREE.LineBasicMaterial({
-    color: 0x2563eb,
-    transparent: true,
-    opacity: 0.18,
-  });
-  for (let i = 0; i < 8; i++) {
-    const pts = new Float32Array([
-      centerX - 12 + i * 3,
-      -1.33,
-      centerZ - 5 + (i % 4) * 2.5,
-      centerX + 12 - i * 2,
-      -1.33,
-      centerZ + 5 - (i % 4) * 2.5,
-    ]);
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.BufferAttribute(pts, 3));
-    traces.add(new THREE.Line(geo, traceMat));
-  }
-  g.add(base, grid, traces);
+  g.add(base);
   return g;
 }

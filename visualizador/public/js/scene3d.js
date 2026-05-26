@@ -31,7 +31,6 @@ export const PATH_COLORS = {
 
 /** Infra à esquerda (z=0); tier_score em faixa lateral separada (z negativo) */
 export const LAYOUT_CENTER = new THREE.Vector3(4, 1.5, -1.5);
-export const LAYOUT_HALF = { x: 20, z: 8 };
 export const SCORER_Z = -5.5;
 export const SCORER_STEP = 3.8;
 export const BRANCH_Z = 2.6;
@@ -166,30 +165,6 @@ export function createScene(wrap) {
 
   scene.add(buildPcbFloor(LAYOUT_CENTER.x, LAYOUT_CENTER.z));
 
-  const hx = LAYOUT_HALF.x;
-  const hz = LAYOUT_HALF.z;
-  const cx = LAYOUT_CENTER.x;
-  const cz = LAYOUT_CENTER.z;
-  const y = -1.33;
-  const boundsPts = [
-    new THREE.Vector3(cx - hx, y, cz - hz),
-    new THREE.Vector3(cx + hx, y, cz - hz),
-    new THREE.Vector3(cx + hx, y, cz + hz),
-    new THREE.Vector3(cx - hx, y, cz + hz),
-    new THREE.Vector3(cx - hx, y, cz - hz),
-  ];
-  const boundsGeo = new THREE.BufferGeometry().setFromPoints(boundsPts);
-  scene.add(
-    new THREE.Line(
-      boundsGeo,
-      new THREE.LineBasicMaterial({
-        color: 0x3b82f6,
-        transparent: true,
-        opacity: 0.35,
-      }),
-    ),
-  );
-
   const nodeGroups = [];
   const register = (g) => {
     scene.add(g);
@@ -298,16 +273,6 @@ export function createScene(wrap) {
     scene.add(
       new THREE.Mesh(new THREE.TubeGeometry(path, 64, 0.026, 5, false), retCore),
       new THREE.Mesh(new THREE.TubeGeometry(path, 64, 0.048, 5, false), retGlow),
-    );
-    const laneGeo = new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(pts[2].x, -1.32, RETURN_LANE_Z),
-      new THREE.Vector3(pts[3].x, -1.32, RETURN_LANE_Z),
-    ]);
-    scene.add(
-      new THREE.Line(
-        laneGeo,
-        new THREE.LineBasicMaterial({ color: 0x2dd4bf, transparent: true, opacity: 0.2 }),
-      ),
     );
     for (const p of [pts[0], pts[pts.length - 1]]) {
       const plug = new THREE.Mesh(

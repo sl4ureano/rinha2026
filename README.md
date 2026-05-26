@@ -2,6 +2,10 @@
 
 API em **Rust**: load balancer repassa conexões TCP para duas instâncias que classificam cada transação em **camadas** (`tier_score`: gasto seguro → gasto arriscado → árvore → ratio), sem k-NN no caminho quente.
 
+![Screenshot do visualizador 3D](visualizador/public/img/print.png)
+
+Visualizador 3D em tempo real: `visualizador/` (veja [`visualizador/README.md`](visualizador/README.md)).
+
 ## Arquitetura
 
 ```mermaid

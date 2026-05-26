@@ -2,6 +2,10 @@
 
 Apresentação **lúdica e em tempo real** do fluxo `POST /fraud-score`: load balancer, FD-pass, APIs, `tier_score` (atalhos → árvore → ratio) e métricas da última request.
 
+## Screenshot
+
+![Screenshot do visualizador 3D](public/img/print.png)
+
 ## Pré-requisitos
 
 - [Node.js](https://nodejs.org/) 18+
