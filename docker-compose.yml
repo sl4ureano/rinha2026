@@ -1,6 +1,6 @@
 services:
   lb:
-    image: ghcr.io/sl4ureano/rinha2026:versao-final
+    image: ghcr.io/sl4ureano/rinha2026:versao-final-c
     command: ["./lb"]
     environment:
       - LB_PORT=9999
@@ -15,19 +15,20 @@ services:
         condition: service_healthy
     volumes:
       - sockets:/tmp/sockets
-    cpus: 0.10
-    mem_limit: 8m
-    memswap_limit: 8m
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     deploy:
       resources:
         limits:
-          cpus: "0.10"
-          memory: 8M
+          cpus: "0.20"
+          memory: 20M
     networks:
       - rinha
 
   api1:
-    image: ghcr.io/sl4ureano/rinha2026:versao-final
+    image: ghcr.io/sl4ureano/rinha2026:versao-final-c
     environment:
       - FD_PASS=1
       - INDEX_PATH=/app/data/index.bin
@@ -41,19 +42,20 @@ services:
       start_period: 15s
     volumes:
       - sockets:/tmp/sockets
-    cpus: 0.45
-    mem_limit: 169m
-    memswap_limit: 169m
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     deploy:
       resources:
         limits:
-          cpus: "0.45"
-          memory: 169M
+          cpus: "0.40"
+          memory: 165M
     networks:
       - rinha
 
   api2:
-    image: ghcr.io/sl4ureano/rinha2026:versao-final
+    image: ghcr.io/sl4ureano/rinha2026:versao-final-c
     environment:
       - FD_PASS=1
       - INDEX_PATH=/app/data/index.bin
@@ -67,14 +69,15 @@ services:
       start_period: 15s
     volumes:
       - sockets:/tmp/sockets
-    cpus: 0.45
-    mem_limit: 169m
-    memswap_limit: 169m
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     deploy:
       resources:
         limits:
-          cpus: "0.45"
-          memory: 169M
+          cpus: "0.40"
+          memory: 165M
     networks:
       - rinha
 
