@@ -1,0 +1,92 @@
+services:
+  lb:
+    image: ghcr.io/sl4ureano/rinha2026:versao-final-c
+    command: ["/app/lb"]
+    environment:
+      - LB_PORT=9999
+      - API1_SOCKET=/tmp/sockets/api1.sock
+      - API2_SOCKET=/tmp/sockets/api2.sock
+    depends_on:
+      api1:
+        condition: service_healthy
+      api2:
+        condition: service_healthy
+    volumes:
+      - sockets:/tmp/sockets
+    cpus: 0.10
+    mem_limit: 8m
+    memswap_limit: 8m
+    deploy:
+      resources:
+        limits:
+          cpus: "0.10"
+          memory: 8M
+    networks:
+      - rinha
+
+  api1:
+    image: ghcr.io/sl4ureano/rinha2026:versao-final-c
+    command: ["/app/server"]
+    environment:
+      - FD_PASS=1
+      - INDEX_PATH=/app/data/index.bin
+      - CTRL_SOCK=/tmp/sockets/api1.sock
+      - PORT=8080
+    healthcheck:
+      test: ["CMD", "/app/healthcheck"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+      start_period: 15s
+    volumes:
+      - sockets:/tmp/sockets
+    cpus: 0.45
+    mem_limit: 169m
+    memswap_limit: 169m
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: 169M
+    networks:
+      - rinha
+
+  api2:
+    image: ghcr.io/sl4ureano/rinha2026:versao-final-c
+    command: ["/app/server"]
+    environment:
+      - FD_PASS=1
+      - INDEX_PATH=/app/data/index.bin
+      - CTRL_SOCK=/tmp/sockets/api2.sock
+      - PORT=8080
+    healthcheck:
+      test: ["CMD", "/app/healthcheck"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+      start_period: 15s
+    volumes:
+      - sockets:/tmp/sockets
+    cpus: 0.45
+    mem_limit: 169m
+    memswap_limit: 169m
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: 169M
+    networks:
+      - rinha
+
+volumes:
+  sockets:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=4m,mode=0777
+
+networks:
+  rinha:
+    driver: bridge
+

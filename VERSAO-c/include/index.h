@@ -35,6 +35,7 @@ typedef struct {
 } index_t;
 
 int index_open(index_t *idx, const char *path);
+void index_init_empty(index_t *idx);
 void index_close(index_t *idx);
 
 uint32_t index_part_count(const index_t *idx);

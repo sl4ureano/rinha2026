@@ -88,17 +88,33 @@ static const char *env_or(const char *key, const char *def)
     return (v && *v) ? v : def;
 }
 
+static int env_truthy(const char *key)
+{
+    const char *v = getenv(key);
+    return v && (strcmp(v, "1") == 0 || strcasecmp(v, "true") == 0);
+}
+
+static int tier_only_mode(void)
+{
+    if (env_truthy("TIER_ONLY") || env_truthy("SKIP_INDEX")) return 1;
+    return env_truthy("FD_PASS");
+}
+
 int main(void)
 {
     const char *index_path = env_or("INDEX_PATH", "/app/data/index.bin");
 
     index_t idx;
-    if (index_open(&idx, index_path) != 0) {
+    if (tier_only_mode()) {
+        index_init_empty(&idx);
+        fprintf(stderr, "tier-only: index mmap skipped\n");
+    } else if (index_open(&idx, index_path) != 0) {
         fprintf(stderr, "index open %s failed\n", index_path);
         return 1;
+    } else {
+        fprintf(stderr, "index: %u partitions, %u nodes, %u blocks\n",
+                index_part_count(&idx), index_node_count(&idx), index_block_count(&idx));
     }
-    fprintf(stderr, "index: %u partitions, %u nodes, %u blocks\n",
-            index_part_count(&idx), index_node_count(&idx), index_block_count(&idx));
     const char *ctrl = getenv("CTRL_SOCK");
     if (!ctrl || !*ctrl) ctrl = getenv("RINHA_FD_SOCK");
     if (!ctrl || !*ctrl) {

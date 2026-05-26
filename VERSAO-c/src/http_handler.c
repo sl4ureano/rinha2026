@@ -25,10 +25,7 @@ static int write_all(int fd, const uint8_t *buf, size_t len)
 
 static inline int write_resp(int fd, const uint8_t *buf, size_t len)
 {
-    ssize_t n = write(fd, buf, len);
-    if (n == (ssize_t)len) return 0;
-    if (n < 0) return -1;
-    return write_all(fd, buf + (size_t)n, len - (size_t)n);
+    return write_all(fd, buf, len);
 }
 
 static int find_double_crlf(const uint8_t *buf, size_t len, size_t *out)
@@ -206,6 +203,7 @@ void serve_connection(int fd, const index_t *idx)
         }
         if (req_len + (size_t)n > req_cap) {
             if (req_len + (size_t)n > REQ_CAP) {
+                write_resp(fd, RESP_DENIED_S10, RESP_DENIED_S10_LEN);
                 free(req_buf);
                 close(fd);
                 return;

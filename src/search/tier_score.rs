@@ -11,28 +11,80 @@ const MAX_KM: f32 = 1000.0;
 const MAX_TX24H: f32 = 20.0;
 const MAX_MERCHANT_AVG: f32 = 10_000.0;
 const RATIO_FRAUD_THRESHOLD: f32 = 0.06951915;
+const LEGIT_RATIO_CAP: f32 = 0.50001;
+
+/// Caminho tomado (útil para `tier_paths` / tuning).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TierPath {
+    ObviousLegit,
+    ObviousFraud,
+    Tree,
+    Ratio,
+}
+
+struct TierCtx {
+    safe_avg: f32,
+    known: bool,
+    mcc: u32,
+    requested: Option<ParsedTime>,
+}
+
+impl TierCtx {
+    #[inline]
+    fn from_payload(p: &RawPayload<'_>) -> Self {
+        Self {
+            safe_avg: p.customer_avg_amount.max(1.0),
+            known: merchant_known(p),
+            mcc: mcc4_u32(p.merchant_mcc),
+            requested: parse_iso(p.requested_at),
+        }
+    }
+}
 
 /// Contagem 0–5 para respostas HTTP estáticas (0 = aprova, 5 = nega).
+#[inline]
 pub fn tier_fraud_count(p: &RawPayload<'_>) -> u8 {
-    if obvious_legit(p) {
+    let ctx = TierCtx::from_payload(p);
+    if obvious_legit(p, &ctx) {
         return 0;
     }
-    if obvious_fraud(p) {
+    if obvious_fraud(p, &ctx) {
         return 5;
     }
-    if let Some(features) = build_tree_features(p) {
+    if ctx.requested.is_none() {
+        return ratio_fraud_count(p);
+    }
+    if let Some(features) = build_tree_features(p, &ctx) {
         return if decision_tree::predict(&features) { 5 } else { 0 };
     }
     ratio_fraud_count(p)
 }
 
 #[inline]
-fn obvious_legit(p: &RawPayload<'_>) -> bool {
+pub fn tier_path(p: &RawPayload<'_>) -> TierPath {
+    let ctx = TierCtx::from_payload(p);
+    if obvious_legit(p, &ctx) {
+        return TierPath::ObviousLegit;
+    }
+    if obvious_fraud(p, &ctx) {
+        return TierPath::ObviousFraud;
+    }
+    if ctx.requested.is_none() {
+        return TierPath::Ratio;
+    }
+    if build_tree_features(p, &ctx).is_some() {
+        TierPath::Tree
+    } else {
+        TierPath::Ratio
+    }
+}
+
+#[inline]
+fn obvious_legit(p: &RawPayload<'_>, ctx: &TierCtx) -> bool {
     if p.amount > 500.0 {
         return false;
     }
-    let safe_avg = p.customer_avg_amount.max(1.0);
-    if p.amount / safe_avg > 0.50001 {
+    if p.amount > ctx.safe_avg * LEGIT_RATIO_CAP {
         return false;
     }
     if p.installments > 3 {
@@ -41,23 +93,39 @@ fn obvious_legit(p: &RawPayload<'_>) -> bool {
     if p.tx_count_24h > 5 {
         return false;
     }
-    if !merchant_known(p) {
-        return false;
-    }
     if p.km_from_home > 50.0 {
         return false;
     }
-    is_safe_mcc(p.merchant_mcc)
+    if !mcc_is_safe(ctx.mcc) {
+        return false;
+    }
+    ctx.known
 }
 
 #[inline]
-fn obvious_fraud(p: &RawPayload<'_>) -> bool {
+fn obvious_fraud(p: &RawPayload<'_>, ctx: &TierCtx) -> bool {
     p.amount >= 5000.0
         && p.installments >= 5
         && p.tx_count_24h >= 6
-        && !merchant_known(p)
         && p.km_from_home >= 150.0
-        && is_risky_mcc(p.merchant_mcc)
+        && mcc_is_risky(ctx.mcc)
+        && !ctx.known
+}
+
+/// Só a árvore (para análise offline em `tier-paths`).
+pub fn tree_only_count(p: &RawPayload<'_>) -> Option<u8> {
+    let ctx = TierCtx::from_payload(p);
+    let features = build_tree_features(p, &ctx)?;
+    Some(if decision_tree::predict(&features) {
+        5
+    } else {
+        0
+    })
+}
+
+/// Só o ratio (para análise offline em `tier-paths`).
+pub fn ratio_only_count(p: &RawPayload<'_>) -> u8 {
+    ratio_fraud_count(p)
 }
 
 #[inline]
@@ -71,11 +139,9 @@ fn ratio_fraud_count(p: &RawPayload<'_>) -> u8 {
     }
 }
 
-fn build_tree_features(p: &RawPayload<'_>) -> Option<[f32; FEATURE_COUNT]> {
-    let requested = parse_iso(p.requested_at)?;
-    let safe_avg = p.customer_avg_amount.max(1.0);
-    let amount_ratio = p.amount / safe_avg;
-    let known = merchant_known(p);
+fn build_tree_features(p: &RawPayload<'_>, ctx: &TierCtx) -> Option<[f32; FEATURE_COUNT]> {
+    let requested = ctx.requested?;
+    let amount_ratio = p.amount / ctx.safe_avg;
 
     let (minutes_since_last, km_from_last, last_null) = match p.last_timestamp {
         Some(ts) => {
@@ -104,8 +170,8 @@ fn build_tree_features(p: &RawPayload<'_>) -> Option<[f32; FEATURE_COUNT]> {
         clamp01(p.tx_count_24h as f32 / MAX_TX24H),
         if p.is_online { 1.0 } else { 0.0 },
         if p.card_present { 1.0 } else { 0.0 },
-        if known { 0.0 } else { 1.0 },
-        mcc_risk_table(p.merchant_mcc),
+        if ctx.known { 0.0 } else { 1.0 },
+        mcc_risk_table_u32(ctx.mcc),
         clamp01(p.merchant_avg_amount / MAX_MERCHANT_AVG),
         last_null,
         p.amount,
@@ -117,10 +183,46 @@ fn build_tree_features(p: &RawPayload<'_>) -> Option<[f32; FEATURE_COUNT]> {
     ])
 }
 
+#[derive(Copy, Clone)]
 struct ParsedTime {
     hour: u8,
     weekday_monday0: u8,
     epoch_seconds: i64,
+}
+
+#[inline]
+fn mcc4_u32(mcc: &[u8]) -> u32 {
+    if mcc.len() != 4 {
+        return u32::MAX;
+    }
+    u32::from_be_bytes([mcc[0], mcc[1], mcc[2], mcc[3]])
+}
+
+#[inline]
+fn mcc_is_safe(mcc: u32) -> bool {
+    matches!(mcc, 0x3534_3131 | 0x3538_3132 | 0x3539_3132 | 0x3533_3131)
+}
+
+#[inline]
+fn mcc_is_risky(mcc: u32) -> bool {
+    matches!(mcc, 0x3739_3935 | 0x3738_3031 | 0x3738_3032)
+}
+
+#[inline]
+fn mcc_risk_table_u32(mcc: u32) -> f32 {
+    match mcc {
+        0x3534_3131 => 0.15,
+        0x3538_3132 => 0.30,
+        0x3539_3132 => 0.20,
+        0x3539_3434 => 0.45,
+        0x3738_3031 => 0.80,
+        0x3738_3032 => 0.75,
+        0x3739_3935 => 0.85,
+        0x3435_3131 => 0.35,
+        0x3533_3131 => 0.25,
+        0x3539_3939 => 0.50,
+        _ => 0.50,
+    }
 }
 
 fn parse_iso(ts: &[u8]) -> Option<ParsedTime> {
@@ -196,8 +298,16 @@ fn merchant_known(p: &RawPayload<'_>) -> bool {
 
 #[inline]
 fn contains_quoted(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() {
+    if needle.is_empty() || haystack.len() < needle.len() + 2 {
         return false;
+    }
+    if needle.len() + 2 <= 32 {
+        let mut pat = [0u8; 34];
+        pat[0] = b'"';
+        pat[1..1 + needle.len()].copy_from_slice(needle);
+        pat[1 + needle.len()] = b'"';
+        let pat = &pat[..needle.len() + 2];
+        return haystack.windows(pat.len()).any(|w| w == pat);
     }
     let mut i = 0;
     while i + needle.len() + 1 < haystack.len() {
@@ -210,31 +320,4 @@ fn contains_quoted(haystack: &[u8], needle: &[u8]) -> bool {
         i += 1;
     }
     false
-}
-
-#[inline]
-fn is_safe_mcc(mcc: &[u8]) -> bool {
-    matches!(mcc, b"5411" | b"5812" | b"5912" | b"5311")
-}
-
-#[inline]
-fn is_risky_mcc(mcc: &[u8]) -> bool {
-    matches!(mcc, b"7995" | b"7801" | b"7802")
-}
-
-#[inline]
-fn mcc_risk_table(mcc: &[u8]) -> f32 {
-    match mcc {
-        b"5411" => 0.15,
-        b"5812" => 0.30,
-        b"5912" => 0.20,
-        b"5944" => 0.45,
-        b"7801" => 0.80,
-        b"7802" => 0.75,
-        b"7995" => 0.85,
-        b"4511" => 0.35,
-        b"5311" => 0.25,
-        b"5999" => 0.50,
-        _ => 0.50,
-    }
 }

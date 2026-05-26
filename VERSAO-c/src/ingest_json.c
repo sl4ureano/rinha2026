@@ -96,7 +96,6 @@ static int parse_f32_bytes(const uint8_t *b, size_t len, float *out)
         i++;
         while (i < len && b[i] >= '0' && b[i] <= '9') {
             if (!u64_mul10_add(&frac, b[i] - '0')) return 0;
-            if (!u64_mul10_add(&frac_div, 0)) return 0; /* frac_div *= 10 */
             if (frac_div > UINT64_MAX / 10u) return 0;
             frac_div *= 10u;
             i++;
@@ -121,7 +120,9 @@ static int s_read_f32(scanner_t *s, float *out)
             break;
     }
     size_t n = s->i - start;
-    if (n == 0 || n >= 64) return 0;
+    if (n == 0) return 0;
+    if (parse_f32_bytes(s->buf + start, n, out)) return 1;
+    if (n >= 64) return 0;
     char tmp[64];
     memcpy(tmp, s->buf + start, n);
     tmp[n] = '\0';

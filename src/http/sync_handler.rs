@@ -121,11 +121,7 @@ fn fraud_count_body(body: &[u8]) -> u8 {
 }
 
 fn write_resp(stream: &mut TcpStream, payload: &[u8]) -> std::io::Result<()> {
-    match stream.write(payload) {
-        Ok(n) if n == payload.len() => Ok(()),
-        Ok(n) => stream.write_all(&payload[n..]),
-        Err(e) => Err(e),
-    }
+    stream.write_all(payload)
 }
 
 fn parse_request_line(line: &[u8]) -> Option<(&[u8], &[u8])> {

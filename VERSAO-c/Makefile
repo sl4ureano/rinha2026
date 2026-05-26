@@ -10,7 +10,7 @@ LIB_SRCS = src/index_mmap.c src/index_quantize.c src/knn.c src/distance_avx2.c \
 LIB_OBJS = $(LIB_SRCS:.c=.o)
 
 .PHONY: all clean
-all: server lb healthcheck score_one
+all: server lb healthcheck score_one verify-tier tier_one
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -27,5 +27,11 @@ healthcheck: src/healthcheck.c
 score_one: src/score_one.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) -o $@ src/score_one.c $(LIB_OBJS) $(LDFLAGS)
 
+verify-tier: src/verify_tier.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) -o $@ src/verify_tier.c $(LIB_OBJS) $(LDFLAGS)
+
+tier_one: src/tier_one.c src/ingest_json.o src/ingest_features.o src/decision_tree.o src/tier_score.o
+	$(CC) $(CFLAGS) -o $@ src/tier_one.c src/ingest_json.o src/ingest_features.o src/decision_tree.o src/tier_score.o $(LDFLAGS)
+
 clean:
-	rm -f server lb healthcheck score_one $(LIB_OBJS)
+	rm -f server lb healthcheck score_one verify-tier $(LIB_OBJS)

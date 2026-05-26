@@ -45,6 +45,22 @@ path = "src/bin/verify_fast.rs"
 name = "verify-tier"
 path = "src/bin/verify_tier.rs"
 
+[[bin]]
+name = "tier-paths"
+path = "src/bin/tier_paths.rs"
+
+[[bin]]
+name = "verify-tier-raw"
+path = "src/bin/verify_tier_raw.rs"
+
+[[bin]]
+name = "verify-c-parity"
+path = "src/bin/verify_c_parity.rs"
+
+[[bin]]
+name = "export-tier-counts"
+path = "src/bin/export_tier_counts.rs"
+
 [profile.release]
 opt-level = 3
 lto = "fat"

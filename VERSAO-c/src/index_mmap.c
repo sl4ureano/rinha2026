@@ -9,6 +9,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+void index_init_empty(index_t *idx) { memset(idx, 0, sizeof(*idx)); }
+
 int index_open(index_t *idx, const char *path)
 {
     int fd = open(path, O_RDONLY);
@@ -82,8 +84,7 @@ int index_open(index_t *idx, const char *path)
     }
 
     madvise((void *)data, size, MADV_HUGEPAGE);
-    madvise((void *)(d + vectors_off), size - (size_t)vectors_off,
-            MADV_HUGEPAGE | MADV_RANDOM | MADV_WILLNEED);
+    madvise((void *)(d + vectors_off), size - (size_t)vectors_off, MADV_HUGEPAGE | MADV_RANDOM);
     return 0;
 }
 
