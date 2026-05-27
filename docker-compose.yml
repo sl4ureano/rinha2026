@@ -1,6 +1,6 @@
 services:
   lb:
-    image: ghcr.io/sl4ureano/rinha2026:versao-final-plus-c
+    image: ghcr.io/sl4ureano/rinha2026:versao-final-plus-plus-c
     command: ["/app/lb"]
     environment:
       - LB_PORT=9999
@@ -29,7 +29,7 @@ services:
       - rinha
 
   api1:
-    image: ghcr.io/sl4ureano/rinha2026:versao-final-plus-c
+    image: ghcr.io/sl4ureano/rinha2026:versao-final-plus-plus-c
     command: ["/app/server"]
     environment:
       - FD_PASS=1
@@ -57,7 +57,7 @@ services:
       - rinha
 
   api2:
-    image: ghcr.io/sl4ureano/rinha2026:versao-final-plus-c
+    image: ghcr.io/sl4ureano/rinha2026:versao-final-plus-plus-c
     command: ["/app/server"]
     environment:
       - FD_PASS=1
