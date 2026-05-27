@@ -7,7 +7,7 @@ services:
       - LB_PORT=9999
       - API1_SOCKET=/tmp/sockets/api1.sock
       - API2_SOCKET=/tmp/sockets/api2.sock
-      - CHANNELS_PER_API=4
+      - CHANNELS_PER_API=8
     ports:
       - "9999:9999"
     depends_on:
