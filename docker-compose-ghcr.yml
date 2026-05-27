@@ -6,6 +6,7 @@ services:
       - LB_PORT=9999
       - API1_SOCKET=/tmp/sockets/api1.sock
       - API2_SOCKET=/tmp/sockets/api2.sock
+      - CHANNELS_PER_API=4
     ports:
       - "9999:9999"
     depends_on:
@@ -38,8 +39,8 @@ services:
       test: ["CMD", "/app/healthcheck"]
       interval: 1s
       timeout: 1s
-      retries: 60
-      start_period: 30s
+      retries: 30
+      start_period: 15s
     volumes:
       - sockets:/tmp/sockets
     ulimits:
@@ -65,8 +66,8 @@ services:
       test: ["CMD", "/app/healthcheck"]
       interval: 1s
       timeout: 1s
-      retries: 60
-      start_period: 30s
+      retries: 30
+      start_period: 15s
     volumes:
       - sockets:/tmp/sockets
     ulimits:

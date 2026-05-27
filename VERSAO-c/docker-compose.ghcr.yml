@@ -1,12 +1,14 @@
 services:
   lb:
-    image: ghcr.io/sl4ureano/rinha2026:versao-final-c
+    image: ghcr.io/sl4ureano/rinha2026:versao-final-plus-c
     command: ["/app/lb"]
     environment:
       - LB_PORT=9999
       - API1_SOCKET=/tmp/sockets/api1.sock
       - API2_SOCKET=/tmp/sockets/api2.sock
       - CHANNELS_PER_API=4
+    ports:
+      - "9999:9999"
     depends_on:
       api1:
         condition: service_healthy
@@ -27,7 +29,7 @@ services:
       - rinha
 
   api1:
-    image: ghcr.io/sl4ureano/rinha2026:versao-final-c
+    image: ghcr.io/sl4ureano/rinha2026:versao-final-plus-c
     command: ["/app/server"]
     environment:
       - FD_PASS=1
@@ -38,8 +40,8 @@ services:
       test: ["CMD", "/app/healthcheck"]
       interval: 1s
       timeout: 1s
-      retries: 60
-      start_period: 30s
+      retries: 30
+      start_period: 15s
     volumes:
       - sockets:/tmp/sockets
     ulimits:
@@ -55,7 +57,7 @@ services:
       - rinha
 
   api2:
-    image: ghcr.io/sl4ureano/rinha2026:versao-final-c
+    image: ghcr.io/sl4ureano/rinha2026:versao-final-plus-c
     command: ["/app/server"]
     environment:
       - FD_PASS=1
@@ -66,8 +68,8 @@ services:
       test: ["CMD", "/app/healthcheck"]
       interval: 1s
       timeout: 1s
-      retries: 60
-      start_period: 30s
+      retries: 30
+      start_period: 15s
     volumes:
       - sockets:/tmp/sockets
     ulimits:

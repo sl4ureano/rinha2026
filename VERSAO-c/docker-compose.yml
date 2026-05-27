@@ -49,8 +49,8 @@ services:
       test: ["CMD", "/app/healthcheck"]
       interval: 1s
       timeout: 1s
-      retries: 60
-      start_period: 30s
+      retries: 30
+      start_period: 15s
     volumes:
       - sockets:/tmp/sockets
     ulimits:
@@ -78,8 +78,8 @@ services:
       test: ["CMD", "/app/healthcheck"]
       interval: 1s
       timeout: 1s
-      retries: 60
-      start_period: 30s
+      retries: 30
+      start_period: 15s
     volumes:
       - sockets:/tmp/sockets
     ulimits:
