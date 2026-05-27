@@ -18,6 +18,11 @@ typedef struct {
     int fd;
 } conn_arg_t;
 
+typedef struct {
+    const index_t *idx;
+    uint16_t port;
+} health_arg_t;
+
 static void *conn_thread(void *arg)
 {
     conn_arg_t *a = (conn_arg_t *)arg;
@@ -49,8 +54,10 @@ static void spawn_conn(const index_t *idx, int fd)
 
 static void *health_thread(void *arg)
 {
-    uint16_t port = *(uint16_t *)arg;
-    free(arg);
+    health_arg_t *ha = (health_arg_t *)arg;
+    const index_t *idx = ha->idx;
+    uint16_t port = ha->port;
+    free(ha);
     int lfd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (lfd < 0) return NULL;
     int one = 1;
@@ -73,7 +80,9 @@ static void *health_thread(void *arg)
         if (n > 0) {
             for (ssize_t i = 0; i + 6 <= n; i++) {
                 if (memcmp(buf + i, "/ready", 6) == 0) {
-                    write(c, RESP_READY, RESP_READY_LEN);
+                    const uint8_t *r = resp_ready(idx && idx->ready);
+                    size_t rl = resp_ready_len(idx && idx->ready);
+                    write(c, r, rl);
                     break;
                 }
             }
@@ -107,6 +116,7 @@ int main(void)
     index_t idx;
     if (tier_only_mode()) {
         index_init_empty(&idx);
+        idx.ready = 1;
         fprintf(stderr, "tier-only: index mmap skipped\n");
     } else if (index_open(&idx, index_path) != 0) {
         fprintf(stderr, "index open %s failed\n", index_path);
@@ -114,6 +124,9 @@ int main(void)
     } else {
         fprintf(stderr, "index: %u partitions, %u nodes, %u blocks\n",
                 index_part_count(&idx), index_node_count(&idx), index_block_count(&idx));
+        fprintf(stderr, "warming up index...\n");
+        index_warmup(&idx);
+        fprintf(stderr, "index warm\n");
     }
     const char *ctrl = getenv("CTRL_SOCK");
     if (!ctrl || !*ctrl) ctrl = getenv("RINHA_FD_SOCK");
@@ -124,8 +137,9 @@ int main(void)
     }
 
     if (ctrl && *ctrl) {
-        uint16_t *hp = malloc(sizeof(uint16_t));
-        *hp = (uint16_t)atoi(env_or("PORT", "8080"));
+        health_arg_t *hp = malloc(sizeof(*hp));
+        hp->idx = &idx;
+        hp->port = (uint16_t)atoi(env_or("PORT", "8080"));
         pthread_t ht;
         pthread_create(&ht, NULL, health_thread, hp);
         pthread_detach(ht);

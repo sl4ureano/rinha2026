@@ -10,6 +10,8 @@ void serve_connection(int fd, const index_t *idx);
 
 const uint8_t *resp_for_count(uint8_t count);
 size_t resp_len_for_count(uint8_t count);
+const uint8_t *resp_ready(int ready);
+size_t resp_ready_len(int ready);
 extern const uint8_t RESP_READY[];
 extern const uint8_t RESP_DENIED_S10[];
 extern const uint8_t RESP_NOT_FOUND[];

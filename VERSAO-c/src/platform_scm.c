@@ -5,6 +5,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -45,6 +46,66 @@ void scm_set_tcp_nodelay(int fd)
 {
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+}
+
+static int g_tune_init;
+static int g_quickack;
+static int g_prefer_busy_poll;
+static int g_busy_poll_us;
+static int g_busy_poll_budget;
+
+static int env_i(const char *k, int def)
+{
+    const char *v = getenv(k);
+    if (!v || !*v) return def;
+    return atoi(v);
+}
+
+static void tune_init_once(void)
+{
+    if (g_tune_init) return;
+    g_tune_init = 1;
+    // Defaults: conservative (off).
+    g_quickack = env_i("TCP_QUICKACK", 0);
+    g_prefer_busy_poll = env_i("SO_PREFER_BUSY_POLL", 0);
+    g_busy_poll_us = env_i("SO_BUSY_POLL_US", 0);
+    g_busy_poll_budget = env_i("SO_BUSY_POLL_BUDGET", 0);
+}
+
+void scm_tune_tcp_client(int fd)
+{
+    tune_init_once();
+
+    // Always disable Nagle for request/response latency.
+    scm_set_tcp_nodelay(fd);
+
+#ifdef TCP_QUICKACK
+    if (g_quickack) {
+        int one = 1;
+        setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &one, sizeof(one));
+    }
+#endif
+
+#ifdef SO_PREFER_BUSY_POLL
+    if (g_prefer_busy_poll) {
+        int one = 1;
+        setsockopt(fd, SOL_SOCKET, SO_PREFER_BUSY_POLL, &one, sizeof(one));
+    }
+#endif
+
+#ifdef SO_BUSY_POLL
+    if (g_busy_poll_us > 0) {
+        int us = g_busy_poll_us;
+        setsockopt(fd, SOL_SOCKET, SO_BUSY_POLL, &us, sizeof(us));
+    }
+#endif
+
+#ifdef SO_BUSY_POLL_BUDGET
+    if (g_busy_poll_budget > 0) {
+        int b = g_busy_poll_budget;
+        setsockopt(fd, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &b, sizeof(b));
+    }
+#endif
 }
 
 int scm_send_fd(int ctrl_fd, int client_fd)

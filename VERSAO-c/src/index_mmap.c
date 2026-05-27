@@ -75,6 +75,7 @@ int index_open(index_t *idx, const char *path)
     idx->part_count = part_count;
     idx->node_count = node_count;
     idx->block_count = block_count;
+    idx->ready = 0;
 
     for (uint32_t i = 0; i < part_count; i++) {
         const uint8_t *p = d + partitions_off + (int)i * IDX_PART_SIZE;
@@ -121,4 +122,36 @@ uint8_t index_label_at(const index_t *idx, int slot)
 const int16_t *index_vectors_base(const index_t *idx)
 {
     return (const int16_t *)(idx->data + idx->vectors_off);
+}
+
+void index_warmup(index_t *idx)
+{
+    if (!idx || !idx->data || idx->size == 0) {
+        if (idx) idx->ready = 1;
+        return;
+    }
+
+    const uint8_t *d = idx->data;
+    const size_t sz = idx->size;
+
+    volatile uint64_t sum = 0;
+
+    // Touch one byte per page across the whole mapping (page faults upfront).
+    const size_t page = 4096;
+    for (size_t off = 0; off < sz; off += page) {
+        sum += d[off];
+    }
+
+    // Extra touches in the hottest regions to improve locality.
+    const size_t hot_start = (size_t)idx->vectors_off;
+    const size_t hot_end = sz;
+    const size_t stride = 64;
+    for (size_t off = hot_start; off < hot_end; off += stride) {
+        sum += d[off];
+    }
+
+    idx->ready = 1;
+    if (sum == 0xFFFFFFFFFFFFFFFFull) {
+        fprintf(stderr, "warmup: %llu\n", (unsigned long long)sum);
+    }
 }
