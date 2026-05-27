@@ -8,39 +8,31 @@
 #include <xmmintrin.h>
 
 extern void distance_block8_avx2(const int16_t *vectors, size_t block_off_i16,
-                                 const void *q_broadcast, int64_t out[8]);
+                                 const query_vec_t *query, int64_t out[8]);
 
-static void build_q_broadcast(const query_vec_t *query, __m256i qb[IDX_VECTOR_DIM])
+// Top-K with deterministic tie-break.
+// key layout: [dist_sq: high bits][slot: low bits]
+// slot is the absolute reference slot (block_idx * lanes + lane).
+// SHIFT must be >= bits needed to represent slot.
+enum { KEY_SHIFT = 24 };
+static inline uint64_t make_key(uint64_t dist_sq, uint32_t slot)
 {
-    for (int d = 0; d < IDX_VECTOR_DIM; d++) {
-        qb[d] = _mm256_set1_epi32((int32_t)(*query)[d]);
-    }
+    return (dist_sq << KEY_SHIFT) | ((uint64_t)slot & ((1ull << KEY_SHIFT) - 1ull));
 }
+static inline int64_t key_dist(uint64_t key) { return (int64_t)(key >> KEY_SHIFT); }
 
-static inline void insert_best(int64_t dist, uint8_t label, int64_t *dists, uint8_t *labels)
+static inline void insert_best_key(uint64_t key, uint8_t label, uint64_t *keys, uint8_t *labels)
 {
-    if (dist >= dists[4]) return;
-    if (dist < dists[0]) {
-        dists[4] = dists[3]; labels[4] = labels[3];
-        dists[3] = dists[2]; labels[3] = labels[2];
-        dists[2] = dists[1]; labels[2] = labels[1];
-        dists[1] = dists[0]; labels[1] = labels[0];
-        dists[0] = dist; labels[0] = label;
-    } else if (dist < dists[1]) {
-        dists[4] = dists[3]; labels[4] = labels[3];
-        dists[3] = dists[2]; labels[3] = labels[2];
-        dists[2] = dists[1]; labels[2] = labels[1];
-        dists[1] = dist; labels[1] = label;
-    } else if (dist < dists[2]) {
-        dists[4] = dists[3]; labels[4] = labels[3];
-        dists[3] = dists[2]; labels[3] = labels[2];
-        dists[2] = dist; labels[2] = label;
-    } else if (dist < dists[3]) {
-        dists[4] = dists[3]; labels[4] = labels[3];
-        dists[3] = dist; labels[3] = label;
-    } else {
-        dists[4] = dist; labels[4] = label;
+    if (key >= keys[IDX_TOP_K - 1]) return;
+
+    int i = IDX_TOP_K - 1;
+    while (i > 0 && key < keys[i - 1]) {
+        keys[i] = keys[i - 1];
+        labels[i] = labels[i - 1];
+        i--;
     }
+    keys[i] = key;
+    labels[i] = label;
 }
 
 static inline uint8_t sum_labels(const uint8_t labels[IDX_TOP_K])
@@ -48,9 +40,9 @@ static inline uint8_t sum_labels(const uint8_t labels[IDX_TOP_K])
     return labels[0] + labels[1] + labels[2] + labels[3] + labels[4];
 }
 
-static inline int early_done(const int64_t best[IDX_TOP_K])
+static inline int early_done(const uint64_t best_keys[IDX_TOP_K])
 {
-    return best[IDX_TOP_K - 1] <= IDX_EARLY_DISTANCE_LIMIT;
+    return key_dist(best_keys[IDX_TOP_K - 1]) <= IDX_EARLY_DISTANCE_LIMIT;
 }
 
 static inline void read_qv(const uint8_t *p, query_vec_t *v)
@@ -104,7 +96,7 @@ static inline void prefetch_node_bounds(const index_t *idx, int i)
 }
 
 static int scan_leaf(const index_t *idx, int32_t start_block, int32_t len,
-                     const __m256i qb[IDX_VECTOR_DIM], int64_t *best_dists, uint8_t *best_labels)
+                     const query_vec_t *query, uint64_t *best_keys, uint8_t *best_labels)
 {
     const int16_t *vecs = index_vectors_base(idx);
     int blocks = (len + IDX_LANES - 1) / IDX_LANES;
@@ -120,17 +112,19 @@ static int scan_leaf(const index_t *idx, int32_t start_block, int32_t len,
         }
         size_t block_off = (size_t)block_idx * IDX_VECTOR_DIM * IDX_LANES;
         int64_t dists[IDX_LANES];
-        distance_block8_avx2(vecs, block_off, qb, dists);
+        distance_block8_avx2(vecs, block_off, query, dists);
 
         int lane_count = total_len - b * IDX_LANES;
         if (lane_count > IDX_LANES) lane_count = IDX_LANES;
         int labels_base = block_idx * IDX_LANES;
-        int64_t cutoff = best_dists[IDX_TOP_K - 1];
+        int64_t cutoff = key_dist(best_keys[IDX_TOP_K - 1]);
         for (int lane = 0; lane < lane_count; lane++) {
             if (dists[lane] < cutoff) {
                 uint8_t label = index_label_at(idx, labels_base + lane);
-                insert_best(dists[lane], label, best_dists, best_labels);
-                cutoff = best_dists[IDX_TOP_K - 1];
+                const uint32_t slot = (uint32_t)(labels_base + lane);
+                uint64_t key = make_key((uint64_t)dists[lane], slot);
+                insert_best_key(key, label, best_keys, best_labels);
+                cutoff = key_dist(best_keys[IDX_TOP_K - 1]);
                 if (cutoff <= IDX_EARLY_DISTANCE_LIMIT) return 1;
             }
         }
@@ -139,8 +133,8 @@ static int scan_leaf(const index_t *idx, int32_t start_block, int32_t len,
 }
 
 static int search_node(const index_t *idx, int32_t root, int64_t root_bound,
-                       const query_vec_t *query, const __m256i qb[IDX_VECTOR_DIM],
-                       int64_t *best_dists, uint8_t *best_labels)
+                       const query_vec_t *query,
+                       uint64_t *best_keys, uint8_t *best_labels)
 {
     if (root < 0 || (uint32_t)root >= index_node_count(idx)) return 0;
 
@@ -149,15 +143,15 @@ static int search_node(const index_t *idx, int32_t root, int64_t root_bound,
     int sp = 0;
     int32_t current = root;
     int64_t current_bound = root_bound;
-    int64_t cutoff = best_dists[IDX_TOP_K - 1];
+    int64_t cutoff = key_dist(best_keys[IDX_TOP_K - 1]);
 
     for (;;) {
         if (current_bound < cutoff) {
             int32_t left, right, start, length;
             read_node_split(idx, current, &left, &right, &start, &length);
             if (left < 0) {
-                if (scan_leaf(idx, start, length, qb, best_dists, best_labels)) return 1;
-                cutoff = best_dists[IDX_TOP_K - 1];
+                if (scan_leaf(idx, start, length, query, best_keys, best_labels)) return 1;
+                cutoff = key_dist(best_keys[IDX_TOP_K - 1]);
             } else {
                 query_vec_t lmin, lmax, rmin, rmax;
                 prefetch_node_bounds(idx, left);
@@ -180,7 +174,7 @@ static int search_node(const index_t *idx, int32_t root, int64_t root_bound,
                 }
                 current = near;
                 current_bound = near_b;
-                cutoff = best_dists[IDX_TOP_K - 1];
+                cutoff = key_dist(best_keys[IDX_TOP_K - 1]);
                 continue;
             }
         }
@@ -189,7 +183,7 @@ static int search_node(const index_t *idx, int32_t root, int64_t root_bound,
         current = stack_node[sp];
         current_bound = stack_bound[sp];
     }
-    return early_done(best_dists);
+    return early_done(best_keys);
 }
 
 static void sort_probes(int32_t *parts, int64_t *lbs, int n)
@@ -206,15 +200,12 @@ static void sort_probes(int32_t *parts, int64_t *lbs, int n)
 
 uint8_t fraud_count(const index_t *idx, const query_vec_t *query)
 {
-    int64_t best_dists[IDX_TOP_K];
+    uint64_t best_keys[IDX_TOP_K];
     uint8_t best_labels[IDX_TOP_K];
     for (int i = 0; i < IDX_TOP_K; i++) {
-        best_dists[i] = INT64_MAX;
+        best_keys[i] = UINT64_MAX;
         best_labels[i] = 0;
     }
-
-    __m256i qb[IDX_VECTOR_DIM] __attribute__((aligned(32)));
-    build_q_broadcast(query, qb);
 
     uint32_t key = partition_key(query);
     int32_t primary = index_part_by_key(idx, key);
@@ -222,7 +213,7 @@ uint8_t fraud_count(const index_t *idx, const query_vec_t *query)
     if (primary >= 0) {
         int32_t root;
         read_partition_root(idx, primary, &root);
-        if (search_node(idx, root, 0, query, qb, best_dists, best_labels))
+        if (search_node(idx, root, 0, query, best_keys, best_labels))
             return sum_labels(best_labels);
     }
 
@@ -230,7 +221,7 @@ uint8_t fraud_count(const index_t *idx, const query_vec_t *query)
     int32_t probe_parts[256];
     int64_t probe_lbs[256];
     int n = 0;
-    int64_t cutoff = best_dists[IDX_TOP_K - 1];
+    int64_t cutoff = key_dist(best_keys[IDX_TOP_K - 1]);
 
     for (int32_t i = 0; i < part_count; i++) {
         if (i == primary) continue;
@@ -250,11 +241,11 @@ uint8_t fraud_count(const index_t *idx, const query_vec_t *query)
     sort_probes(probe_parts, probe_lbs, n);
 
     for (int pi = 0; pi < n; pi++) {
-        cutoff = best_dists[IDX_TOP_K - 1];
+        cutoff = key_dist(best_keys[IDX_TOP_K - 1]);
         if (probe_lbs[pi] >= cutoff) break;
         int32_t root;
         read_partition_root(idx, probe_parts[pi], &root);
-        if (search_node(idx, root, probe_lbs[pi], query, qb, best_dists, best_labels))
+        if (search_node(idx, root, probe_lbs[pi], query, best_keys, best_labels))
             break;
     }
     return sum_labels(best_labels);

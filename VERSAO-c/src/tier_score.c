@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "tier_score.h"
 #include "decision_tree.h"
+#include "time_parse.h"
 
 #include <string.h>
 
@@ -23,17 +24,11 @@
 #define MCC7802 0x37383032u
 
 typedef struct {
-    uint8_t hour;
-    uint8_t weekday_monday0;
-    int64_t epoch_seconds;
-} parsed_time_t;
-
-typedef struct {
     float safe_avg;
     int known;
     uint32_t mcc;
     int has_requested;
-    parsed_time_t requested;
+    iso8601_utc_t requested;
 } tier_ctx_t;
 
 static float clamp01(float x)
@@ -41,53 +36,6 @@ static float clamp01(float x)
     if (x < 0.f) return 0.f;
     if (x > 1.f) return 1.f;
     return x;
-}
-
-static int digit2(uint8_t a, uint8_t b, uint32_t *out)
-{
-    if (a < '0' || a > '9' || b < '0' || b > '9') return 0;
-    *out = (uint32_t)(a - '0') * 10u + (uint32_t)(b - '0');
-    return 1;
-}
-
-static int digit4(uint8_t a, uint8_t b, uint8_t c, uint8_t d, int64_t *out)
-{
-    uint32_t hi, lo;
-    if (!digit2(a, b, &hi) || !digit2(c, d, &lo)) return 0;
-    *out = (int64_t)(hi * 100u + lo);
-    return 1;
-}
-
-static int64_t days_from_civil(int64_t y, int64_t m, int64_t d)
-{
-    int64_t year = y;
-    int64_t month = m;
-    if (month <= 2) year -= 1;
-    int64_t era = (year >= 0 ? year : year - 399) / 400;
-    int64_t yoe = year - era * 400;
-    int64_t month_adj = month > 2 ? month - 3 : month + 9;
-    int64_t doy = (153 * month_adj + 2) / 5 + d - 1;
-    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    return era * 146097 + doe - 719468;
-}
-
-static int parse_iso(const uint8_t *ts, size_t len, parsed_time_t *out)
-{
-    if (len < 19) return 0;
-    int64_t year;
-    uint32_t month, day, hour, minute, second = 0;
-    if (!digit4(ts[0], ts[1], ts[2], ts[3], &year)) return 0;
-    if (ts[4] != '-' || ts[7] != '-' || ts[10] != 'T' || ts[13] != ':') return 0;
-    if (!digit2(ts[5], ts[6], &month) || !digit2(ts[8], ts[9], &day)) return 0;
-    if (!digit2(ts[11], ts[12], &hour) || !digit2(ts[14], ts[15], &minute)) return 0;
-    if (len >= 19 && !digit2(ts[17], ts[18], &second)) return 0;
-    int64_t days = days_from_civil(year, (int64_t)month, (int64_t)day);
-    int64_t wd = (days + 3) % 7;
-    if (wd < 0) wd += 7;
-    out->hour = (uint8_t)hour;
-    out->weekday_monday0 = (uint8_t)wd;
-    out->epoch_seconds = days * 86400 + (int64_t)hour * 3600 + (int64_t)minute * 60 + (int64_t)second;
-    return 1;
 }
 
 static uint32_t mcc4_u32(const uint8_t *mcc, size_t len)
@@ -126,7 +74,7 @@ static tier_ctx_t tier_ctx_from(const raw_payload_t *p)
     c.safe_avg = p->customer_avg_amount > 0.f ? p->customer_avg_amount : 1.f;
     c.known = merchant_known(p);
     c.mcc = mcc4_u32(p->merchant_mcc, p->merchant_mcc_len);
-    c.has_requested = parse_iso(p->requested_at, p->requested_at_len, &c.requested);
+    c.has_requested = iso8601_parse_utc(p->requested_at, p->requested_at_len, &c.requested);
     return c;
 }
 
@@ -184,7 +132,7 @@ static uint8_t ratio_fraud_count(const raw_payload_t *p)
 static int build_tree_features(const raw_payload_t *p, const tier_ctx_t *ctx, float out[TREE_FEATURE_COUNT])
 {
     if (!ctx->has_requested) return 0;
-    parsed_time_t requested = ctx->requested;
+    iso8601_utc_t requested = ctx->requested;
     float amount_ratio = p->amount / ctx->safe_avg;
 
     float minutes_since_last = -1.f;
@@ -192,8 +140,8 @@ static int build_tree_features(const raw_payload_t *p, const tier_ctx_t *ctx, fl
     float last_null = 1.f;
 
     if (p->last_timestamp) {
-        parsed_time_t last;
-        if (!parse_iso(p->last_timestamp, p->last_timestamp_len, &last)) return 0;
+        iso8601_utc_t last;
+        if (!iso8601_parse_utc(p->last_timestamp, p->last_timestamp_len, &last)) return 0;
         int64_t delta = requested.epoch_seconds - last.epoch_seconds;
         if (delta < 0) delta = 0;
         minutes_since_last = clamp01((float)delta / 60.f / MAX_MINUTES);

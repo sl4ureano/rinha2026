@@ -2,6 +2,8 @@
 
 const uint8_t RESP_READY[] =
     "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nOK";
+static const uint8_t RESP_NOT_READY[] =
+    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n";
 static const uint8_t RESP_APPROVED_S0[] =
     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 33\r\n"
     "Connection: keep-alive\r\n\r\n{\"approved\":true,\"fraud_score\":0}";
@@ -22,6 +24,16 @@ const uint8_t RESP_DENIED_S10[] =
     "Connection: keep-alive\r\n\r\n{\"approved\":false,\"fraud_score\":1}";
 const uint8_t RESP_NOT_FOUND[] =
     "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n";
+
+const uint8_t *resp_ready(int ready)
+{
+    return ready ? RESP_READY : RESP_NOT_READY;
+}
+
+size_t resp_ready_len(int ready)
+{
+    return ready ? (sizeof(RESP_READY) - 1) : (sizeof(RESP_NOT_READY) - 1);
+}
 
 static const size_t RESP_LEN_BY_COUNT[6] = {
     sizeof(RESP_APPROVED_S0) - 1,

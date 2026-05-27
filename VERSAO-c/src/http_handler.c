@@ -89,7 +89,8 @@ static handle_outcome_t try_handle_one(int fd, const index_t *idx, const uint8_t
     }
 
     if (len >= 10 && memcmp(buf, "GET /ready", 10) == 0) {
-        write_resp(fd, RESP_READY, RESP_READY_LEN);
+        const uint8_t *r = resp_ready(idx && idx->ready);
+        write_resp(fd, r, resp_ready_len(idx && idx->ready));
         *consumed = header_end;
         return CONSUMED_OK;
     }

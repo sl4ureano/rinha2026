@@ -32,11 +32,13 @@ typedef struct {
     uint32_t node_count;
     uint32_t block_count;
     int32_t part_by_key[256];
+    uint8_t ready;
 } index_t;
 
 int index_open(index_t *idx, const char *path);
 void index_init_empty(index_t *idx);
 void index_close(index_t *idx);
+void index_warmup(index_t *idx);
 
 uint32_t index_part_count(const index_t *idx);
 uint32_t index_node_count(const index_t *idx);
