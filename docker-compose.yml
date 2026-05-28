@@ -20,6 +20,7 @@ services:
       nofile:
         soft: 65535
         hard: 65535
+    cpuset: "2,3"
     deploy:
       resources:
         limits:
@@ -48,6 +49,7 @@ services:
       nofile:
         soft: 65535
         hard: 65535
+    cpuset: "0"
     deploy:
       resources:
         limits:
@@ -76,6 +78,7 @@ services:
       nofile:
         soft: 65535
         hard: 65535
+    cpuset: "1"
     deploy:
       resources:
         limits:
@@ -95,4 +98,6 @@ volumes:
 networks:
   rinha:
     driver: bridge
+
+
 
