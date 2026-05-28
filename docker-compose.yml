@@ -1,6 +1,6 @@
 services:
   lb:
-    image: ghcr.io/sl4ureano/rinha2026:last-version
+    image: ghcr.io/sl4ureano/rinha2026:megazord
     pull_policy: always
     command: ["./lb"]
     environment:
@@ -24,19 +24,18 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.05"
-          memory: 30M
+          cpus: "0.10"
+          memory: 10M
     logging:
       driver: none
     networks:
       - rinha
 
   api1:
-    image: ghcr.io/sl4ureano/rinha2026:last-version
+    image: ghcr.io/sl4ureano/rinha2026:megazord
     pull_policy: always
     environment:
       - FD_PASS=1
-      - INDEX_PATH=/app/data/index.bin
       - CTRL_SOCK=/tmp/sockets/api1.sock
       - PORT=8080
     healthcheck:
@@ -54,20 +53,19 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.475"
-          memory: 120M
+          cpus: "0.45"
+          memory: 170M
     logging:
       driver: none
     networks:
       - rinha
 
   api2:
-    image: ghcr.io/sl4ureano/rinha2026:last-version
+    image: ghcr.io/sl4ureano/rinha2026:megazord
     pull_policy: always
     network_mode: "none"
     environment:
       - FD_PASS=1
-      - INDEX_PATH=/app/data/index.bin
       - CTRL_SOCK=/tmp/sockets/api2.sock
       - PORT=8080
     healthcheck:
@@ -85,8 +83,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.475"
-          memory: 120M
+          cpus: "0.45"
+          memory: 170M
     logging:
       driver: none
 
