@@ -1,8 +1,8 @@
 services:
   lb:
-    image: ghcr.io/sl4ureano/rinha2026:last-version
+    image: ghcr.io/sl4ureano/rinha2026:last-version-c
     pull_policy: always
-    command: ["./lb"]
+    command: ["/app/lb"]
     environment:
       - LB_PORT=9999
       - API1_SOCKET=/tmp/sockets/api1.sock
@@ -30,8 +30,9 @@ services:
       - rinha
 
   api1:
-    image: ghcr.io/sl4ureano/rinha2026:last-version
+    image: ghcr.io/sl4ureano/rinha2026:last-version-c
     pull_policy: always
+    command: ["/app/server"]
     environment:
       - FD_PASS=1
       - INDEX_PATH=/app/data/index.bin
@@ -58,8 +59,9 @@ services:
       - rinha
 
   api2:
-    image: ghcr.io/sl4ureano/rinha2026:last-version
+    image: ghcr.io/sl4ureano/rinha2026:last-version-c
     pull_policy: always
+    command: ["/app/server"]
     environment:
       - FD_PASS=1
       - INDEX_PATH=/app/data/index.bin
@@ -96,3 +98,4 @@ volumes:
 networks:
   rinha:
     driver: bridge
+
