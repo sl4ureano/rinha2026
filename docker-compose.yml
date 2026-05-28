@@ -1,6 +1,6 @@
 services:
   lb:
-    image: ghcr.io/sl4ureano/rinha2026:versao-final-plus-plus-c
+    image: ghcr.io/sl4ureano/rinha2026:versao-final-c
     command: ["/app/lb"]
     environment:
       - LB_PORT=9999
@@ -20,7 +20,7 @@ services:
       nofile:
         soft: 65535
         hard: 65535
-    cpuset: "2,3"
+    cpuset: "2"
     deploy:
       resources:
         limits:
@@ -30,7 +30,7 @@ services:
       - rinha
 
   api1:
-    image: ghcr.io/sl4ureano/rinha2026:versao-final-plus-plus-c
+    image: ghcr.io/sl4ureano/rinha2026:versao-final-c
     command: ["/app/server"]
     environment:
       - FD_PASS=1
@@ -59,7 +59,7 @@ services:
       - rinha
 
   api2:
-    image: ghcr.io/sl4ureano/rinha2026:versao-final-plus-plus-c
+    image: ghcr.io/sl4ureano/rinha2026:versao-final-c
     command: ["/app/server"]
     environment:
       - FD_PASS=1
@@ -98,6 +98,4 @@ volumes:
 networks:
   rinha:
     driver: bridge
-
-
 
