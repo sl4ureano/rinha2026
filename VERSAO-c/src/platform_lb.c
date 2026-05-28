@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <fcntl.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -149,6 +150,9 @@ static int listen_tcp(uint16_t port)
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    int sndbuf = 262144;
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
 
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
@@ -197,6 +201,13 @@ int run_lb(uint16_t port, const char *upstreams_csv)
             continue;
         }
         scm_set_tcp_nodelay(client);
+        /* TCP_QUICKACK: disable delayed ACK */
+        int one_q = 1;
+        setsockopt(client, IPPROTO_TCP, TCP_QUICKACK, &one_q, sizeof(one_q));
+        /* Set non-blocking before passing to API */
+        int fl = fcntl(client, F_GETFL, 0);
+        if (fl >= 0) fcntl(client, F_SETFL, fl | O_NONBLOCK);
+
         int first = (int)(rr_next++ % (uint32_t)upstream_count);
         if (handoff(first, client) != 0) {
             for (int offset = 1; offset < upstream_count; offset++) {

@@ -96,6 +96,18 @@ pub fn run(cfg: LbConfig) {
             continue;
         }
         set_tcp_nodelay(client);
+        // Disable delayed ACK for faster first-byte response
+        let one_q: libc::c_int = 1;
+        unsafe {
+            libc::setsockopt(client, libc::IPPROTO_TCP, libc::TCP_QUICKACK, &one_q as *const _ as *const _, 4);
+        }
+        // Set non-blocking before passing to API (API side won't have to do it)
+        unsafe {
+            let flags = libc::fcntl(client, libc::F_GETFL, 0);
+            if flags >= 0 {
+                libc::fcntl(client, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+        }
 
         let first = (rr_next % upstream_count as u32) as usize;
         rr_next = rr_next.wrapping_add(1);
@@ -130,6 +142,22 @@ fn tcp_listen(port: u16) -> std::io::Result<RawFd> {
             libc::SOL_SOCKET,
             libc::SO_REUSEPORT,
             &one as *const _ as *const _,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+        libc::setsockopt(
+            sock,
+            libc::IPPROTO_TCP,
+            libc::TCP_NODELAY,
+            &one as *const _ as *const _,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+        // Increase SO_SNDBUF on the control sockets for smoother FD passing
+        let sndbuf: libc::c_int = 262144;
+        libc::setsockopt(
+            sock,
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            &sndbuf as *const _ as *const _,
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         );
     }

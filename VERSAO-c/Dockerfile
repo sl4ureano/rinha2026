@@ -29,7 +29,7 @@ RUN if [ ! -f resources/references.json.gz ]; then \
         "https://github.com/zanfranceschi/rinha-de-backend-2026/raw/main/resources/references.json.gz"; \
     fi
 
-ARG LEAF_SIZE=96
+ARG LEAF_SIZE=48
 RUN mkdir -p data && \
     /app/build-index resources data/index.bin ${LEAF_SIZE}
 

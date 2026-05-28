@@ -1,6 +1,7 @@
 services:
   lb:
-    image: ghcr.io/sl4ureano/rinha2026:latest
+    image: ghcr.io/sl4ureano/rinha2026:last-version
+    pull_policy: always
     command: ["./lb"]
     environment:
       - LB_PORT=9999
@@ -29,7 +30,8 @@ services:
       - rinha
 
   api1:
-    image: ghcr.io/sl4ureano/rinha2026:latest
+    image: ghcr.io/sl4ureano/rinha2026:last-version
+    pull_policy: always
     environment:
       - FD_PASS=1
       - INDEX_PATH=/app/data/index.bin
@@ -56,7 +58,8 @@ services:
       - rinha
 
   api2:
-    image: ghcr.io/sl4ureano/rinha2026:latest
+    image: ghcr.io/sl4ureano/rinha2026:last-version
+    pull_policy: always
     environment:
       - FD_PASS=1
       - INDEX_PATH=/app/data/index.bin
