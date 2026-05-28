@@ -1,6 +1,6 @@
 services:
   lb:
-    image: ghcr.io/sl4ureano/rinha2026:a-braba-c
+    image: ghcr.io/sl4ureano/rinha2026:a-braba
     pull_policy: always
     command: ["/app/lb"]
     environment:
@@ -32,7 +32,7 @@ services:
       - rinha
 
   api1:
-    image: ghcr.io/sl4ureano/rinha2026:a-braba-c
+    image: ghcr.io/sl4ureano/rinha2026:a-braba
     pull_policy: always
     command: ["/app/server"]
     environment:
@@ -62,7 +62,7 @@ services:
       - rinha
 
   api2:
-    image: ghcr.io/sl4ureano/rinha2026:a-braba-c
+    image: ghcr.io/sl4ureano/rinha2026:a-braba
     pull_policy: always
     command: ["/app/server"]
     environment:
