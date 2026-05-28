@@ -276,11 +276,7 @@ static void accept_from_lb(int ctrl_fd)
         if (client_fd < 0) return;
         if (client_fd >= MAX_FDS) { close(client_fd); continue; }
 
-        /* Set non-blocking */
-        int flags = fcntl(client_fd, F_GETFL, 0);
-        if (flags >= 0) fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
-
-        /* TCP_NODELAY + TCP_QUICKACK */
+        /* Set socket options here (LB sends bare fd for minimum overhead) */
         int one = 1;
         setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
         setsockopt(client_fd, IPPROTO_TCP, TCP_QUICKACK, &one, sizeof(one));
@@ -288,24 +284,37 @@ static void accept_from_lb(int ctrl_fd)
         conn_t *c = get_conn(client_fd);
         if (!c) { close(client_fd); continue; }
 
-        /* Greedy read: try to read and process immediately */
-        ssize_t n = recv(client_fd, c->buf, BUF_CAP, 0);
-        if (n > 0) {
-            c->buf_len = (size_t)n;
+        /* Spin-read: try recv up to 32 times before falling back to epoll.
+         * With TCP_DEFER_ACCEPT on the LB, data is usually already in the
+         * kernel buffer — spinning avoids a costly epoll round-trip. */
+        int got_data = 0;
+        for (int spin = 0; spin < 32; spin++) {
+            ssize_t n = recv(client_fd, c->buf, BUF_CAP, 0);
+            if (n > 0) {
+                c->buf_len = (size_t)n;
+                got_data = 1;
+                break;
+            } else if (n == 0) {
+                close(client_fd);
+                got_data = -1;
+                break;
+            }
+            /* EAGAIN — data not yet available, spin briefly */
+            __builtin_ia32_pause();
+        }
+
+        if (got_data == -1) continue; /* closed */
+        if (got_data == 1) {
             if (try_process_requests(client_fd, c)) {
-                /* If fully handled but connection not closed, register for next */
                 if (c->send_ptr == NULL && c->buf_len == 0) {
                     struct epoll_event ev = { .events = CLIENT_EVENTS, .data.fd = client_fd };
                     epoll_ctl(g_epfd, EPOLL_CTL_ADD, client_fd, &ev);
                 }
                 continue;
             }
-        } else if (n == 0) {
-            close(client_fd);
-            continue;
         }
-        /* EAGAIN or need more data: register with epoll */
 
+        /* Fall back to epoll if spin-read didn't get data */
         struct epoll_event ev = { .events = CLIENT_EVENTS, .data.fd = client_fd };
         epoll_ctl(g_epfd, EPOLL_CTL_ADD, client_fd, &ev);
     }

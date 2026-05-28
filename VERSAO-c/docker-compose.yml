@@ -1,14 +1,20 @@
+# Subir a partir da raiz do repo:
+#   docker compose -f VERSAO-c/docker-compose.yml -p versao-c up --build
+#
+# Benchmark k6 (rede do container lb — ver README):
+#   cd test && k6 run test.js  (com --network container:versao-c-lb-1)
+
 services:
   lb:
     build:
-      context: .
+      context: ..
       dockerfile: VERSAO-c/Dockerfile
     command: ["/app/lb"]
     environment:
       - LB_PORT=9999
       - API1_SOCKET=/tmp/sockets/api1.sock
       - API2_SOCKET=/tmp/sockets/api2.sock
-      - CHANNELS_PER_API=8
+      - CHANNELS_PER_API=2
     ports:
       - "9999:9999"
     depends_on:
@@ -25,8 +31,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.05"
-          memory: 30M
+          cpus: "0.10"
+          memory: 10M
     logging:
       driver: none
     networks:
@@ -34,12 +40,10 @@ services:
 
   api1:
     build:
-      context: .
+      context: ..
       dockerfile: VERSAO-c/Dockerfile
-    command: ["/app/server"]
     environment:
       - FD_PASS=1
-      - INDEX_PATH=/app/data/index.bin
       - CTRL_SOCK=/tmp/sockets/api1.sock
       - PORT=8080
     healthcheck:
@@ -57,8 +61,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.475"
-          memory: 120M
+          cpus: "0.45"
+          memory: 170M
     logging:
       driver: none
     networks:
@@ -66,13 +70,11 @@ services:
 
   api2:
     build:
-      context: .
+      context: ..
       dockerfile: VERSAO-c/Dockerfile
-    command: ["/app/server"]
     network_mode: "none"
     environment:
       - FD_PASS=1
-      - INDEX_PATH=/app/data/index.bin
       - CTRL_SOCK=/tmp/sockets/api2.sock
       - PORT=8080
     healthcheck:
@@ -90,8 +92,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.475"
-          memory: 120M
+          cpus: "0.45"
+          memory: 170M
     logging:
       driver: none
 

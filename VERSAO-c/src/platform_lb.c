@@ -153,6 +153,12 @@ static int listen_tcp(uint16_t port)
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     int sndbuf = 262144;
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+    /* TCP_DEFER_ACCEPT: kernel holds conn until data arrives */
+    int defer = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &defer, sizeof(defer));
+    /* TCP_FASTOPEN: allow data in SYN */
+    int tfo = 5;
+    setsockopt(fd, IPPROTO_TCP, TCP_FASTOPEN, &tfo, sizeof(tfo));
 
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
@@ -195,18 +201,13 @@ int run_lb(uint16_t port, const char *upstreams_csv)
             port, BACKLOG, upstream_count);
 
     for (;;) {
-        int client = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
+        int client = accept4(listen_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (client < 0) {
             if (errno == EINTR) continue;
             continue;
         }
-        scm_set_tcp_nodelay(client);
-        /* TCP_QUICKACK: disable delayed ACK */
-        int one_q = 1;
-        setsockopt(client, IPPROTO_TCP, TCP_QUICKACK, &one_q, sizeof(one_q));
-        /* Set non-blocking before passing to API */
-        int fl = fcntl(client, F_GETFL, 0);
-        if (fl >= 0) fcntl(client, F_SETFL, fl | O_NONBLOCK);
+        /* Zero socket options here — API sets them after receiving the fd.
+         * This makes the LB path: accept4 → sendmsg → close (3 syscalls). */
 
         int first = (int)(rr_next++ % (uint32_t)upstream_count);
         if (handoff(first, client) != 0) {

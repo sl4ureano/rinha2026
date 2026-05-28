@@ -15,7 +15,8 @@ const MAX_FDS: usize = 65536;
 const MAX_EVENTS: i32 = 512;
 const BUF_CAP: usize = 8192;
 const CTRL_LISTEN_TOKEN: u64 = u64::MAX;
-const EPOLL_TIMEOUT_MS: i32 = 1; // 1ms like dalvorsn (reduces tail latency)
+const TCP_LISTEN_TOKEN: u64 = u64::MAX - 1;
+const EPOLL_TIMEOUT_MS: i32 = 1; // 1ms poll (busy-wait hurts without kernel busy-poll)
 
 // Edge-triggered flags
 const CLIENT_EVENTS: u32 = (libc::EPOLLIN | libc::EPOLLRDHUP | libc::EPOLLET) as u32;
@@ -82,6 +83,162 @@ unsafe fn drop_conn(fd: RawFd) {
     libc::close(fd);
 }
 
+/// Direct TCP mode: server listens on TCP port directly (no LB, no fd-passing).
+pub fn run_direct(index: Arc<Index>, port: u16) -> anyhow::Result<()> {
+    unsafe {
+        INDEX = Arc::into_raw(index);
+        libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE);
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+
+    let tcp_fd = create_tcp_listener(port)?;
+    eprintln!("listening tcp-direct :{port} (epoll ET)");
+
+    unsafe {
+        EPFD = libc::epoll_create1(libc::EPOLL_CLOEXEC);
+        if EPFD < 0 {
+            return Err(anyhow::anyhow!("epoll_create1: {}", std::io::Error::last_os_error()));
+        }
+
+        let params = EpollParams {
+            busy_poll_usecs: 200,
+            busy_poll_budget: 16,
+            prefer_busy_poll: 1,
+            _pad: 0,
+        };
+        let ret = libc::ioctl(EPFD, EPIOCSPARAMS, &params as *const EpollParams);
+        if ret < 0 {
+            eprintln!("EPIOCSPARAMS: {} (non-fatal)", std::io::Error::last_os_error());
+        }
+
+        let mut ev = libc::epoll_event {
+            events: (libc::EPOLLIN | libc::EPOLLET) as u32,
+            u64: TCP_LISTEN_TOKEN,
+        };
+        libc::epoll_ctl(EPFD, libc::EPOLL_CTL_ADD, tcp_fd, &mut ev);
+
+        event_loop_direct(tcp_fd);
+    }
+}
+
+/// Direct TCP event loop — accepts connections and processes inline.
+unsafe fn event_loop_direct(tcp_fd: RawFd) -> ! {
+    let mut events = [libc::epoll_event { events: 0, u64: 0 }; MAX_EVENTS as usize];
+
+    loop {
+        let nfds = libc::epoll_wait(EPFD, events.as_mut_ptr(), MAX_EVENTS, EPOLL_TIMEOUT_MS);
+        if nfds < 0 {
+            continue;
+        }
+
+        for i in 0..nfds as usize {
+            let token = events[i].u64;
+            let revents = events[i].events;
+
+            if token == TCP_LISTEN_TOKEN {
+                accept_tcp_clients(tcp_fd);
+                continue;
+            }
+
+            let fd = token as RawFd;
+
+            if revents & (libc::EPOLLHUP | libc::EPOLLERR) as u32 != 0 {
+                drop_conn(fd);
+                continue;
+            }
+            if revents & libc::EPOLLIN as u32 != 0 {
+                handle_client_read(fd);
+            }
+            if revents & libc::EPOLLOUT as u32 != 0 {
+                handle_client_write(fd);
+            }
+            if revents & libc::EPOLLRDHUP as u32 != 0 {
+                drop_conn(fd);
+            }
+        }
+    }
+}
+
+unsafe fn accept_tcp_clients(tcp_fd: RawFd) {
+    loop {
+        let client_fd = libc::accept4(
+            tcp_fd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+        );
+        if client_fd < 0 {
+            return;
+        }
+        if (client_fd as usize) >= MAX_FDS {
+            libc::close(client_fd);
+            continue;
+        }
+
+        let one: libc::c_int = 1;
+        libc::setsockopt(client_fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, &one as *const _ as *const _, 4);
+        libc::setsockopt(client_fd, libc::IPPROTO_TCP, libc::TCP_QUICKACK, &one as *const _ as *const _, 4);
+
+        let c = get_conn(client_fd);
+        if c.is_null() {
+            libc::close(client_fd);
+            continue;
+        }
+
+        // Greedy read: try to read and process inline
+        let n = libc::recv(client_fd, (*c).buf.as_mut_ptr() as *mut _, BUF_CAP, 0);
+        if n > 0 {
+            (*c).buf_len = n as usize;
+            if try_process_request(client_fd, c) {
+                continue;
+            }
+        } else if n == 0 {
+            libc::close(client_fd);
+            continue;
+        }
+
+        let mut ev = libc::epoll_event {
+            events: CLIENT_EVENTS,
+            u64: client_fd as u64,
+        };
+        libc::epoll_ctl(EPFD, libc::EPOLL_CTL_ADD, client_fd, &mut ev);
+    }
+}
+
+fn create_tcp_listener(port: u16) -> anyhow::Result<RawFd> {
+    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    unsafe {
+        let one: libc::c_int = 1;
+        libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR, &one as *const _ as *const _, 4);
+        libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT, &one as *const _ as *const _, 4);
+        libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, &one as *const _ as *const _, 4);
+        let defer: libc::c_int = 1;
+        libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_DEFER_ACCEPT, &defer as *const _ as *const _, 4);
+        let tfo: libc::c_int = 5;
+        libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_FASTOPEN, &tfo as *const _ as *const _, 4);
+    }
+    let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+    addr.sin_family = libc::AF_INET as libc::sa_family_t;
+    addr.sin_addr.s_addr = u32::to_be(libc::INADDR_ANY);
+    addr.sin_port = port.to_be();
+    if unsafe {
+        libc::bind(fd, &addr as *const _ as *const libc::sockaddr, std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t)
+    } != 0 {
+        let e = std::io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        return Err(e.into());
+    }
+    if unsafe { libc::listen(fd, 65535) } != 0 {
+        let e = std::io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        return Err(e.into());
+    }
+    Ok(fd)
+}
+
 pub fn run(index: Arc<Index>, sock_path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = sock_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -108,8 +265,8 @@ pub fn run(index: Arc<Index>, sock_path: &Path) -> anyhow::Result<()> {
 
         // Configure epoll busy-poll
         let params = EpollParams {
-            busy_poll_usecs: 50,
-            busy_poll_budget: 8,
+            busy_poll_usecs: 200,
+            busy_poll_budget: 16,
             prefer_busy_poll: 1,
             _pad: 0,
         };
@@ -213,13 +370,7 @@ unsafe fn accept_from_lb(ctrl: RawFd) {
             continue;
         }
 
-        // Set non-blocking
-        let flags = libc::fcntl(client_fd, libc::F_GETFL, 0);
-        if flags >= 0 {
-            libc::fcntl(client_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        }
-
-        // TCP_NODELAY + TCP_QUICKACK
+        // Set socket options here (LB sends bare fd for minimum overhead)
         let one: libc::c_int = 1;
         libc::setsockopt(client_fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, &one as *const _ as *const _, 4);
         libc::setsockopt(client_fd, libc::IPPROTO_TCP, libc::TCP_QUICKACK, &one as *const _ as *const _, 4);
@@ -230,20 +381,35 @@ unsafe fn accept_from_lb(ctrl: RawFd) {
             continue;
         }
 
-        // Greedy read: try to read immediately before registering with epoll
-        let n = libc::recv(client_fd, (*c).buf.as_mut_ptr() as *mut _, BUF_CAP, 0);
-        if n > 0 {
-            (*c).buf_len = n as usize;
-            // Try to process immediately
-            if try_process_request(client_fd, c) {
-                continue; // Fully handled inline
+        // Spin-read: try recv up to 32 times before falling back to epoll.
+        // With TCP_DEFER_ACCEPT on the LB, data is usually already in the
+        // kernel buffer — but timing jitter from fd-passing may delay it by
+        // a few microseconds. Spinning here avoids a costly epoll round-trip.
+        let mut got_data = false;
+        for _ in 0..32 {
+            let n = libc::recv(client_fd, (*c).buf.as_mut_ptr() as *mut _, BUF_CAP, 0);
+            if n > 0 {
+                (*c).buf_len = n as usize;
+                got_data = true;
+                break;
+            } else if n == 0 {
+                libc::close(client_fd);
+                got_data = true; // signal to skip epoll registration
+                break;
             }
-        } else if n == 0 {
-            libc::close(client_fd);
-            continue;
+            // EAGAIN — data not yet available, spin briefly
+            std::hint::spin_loop();
         }
-        // n < 0 means EAGAIN, register normally (edge-triggered)
 
+        if got_data && (*c).buf_len > 0 {
+            if try_process_request(client_fd, c) {
+                continue;
+            }
+        } else if got_data {
+            continue; // was closed (n==0)
+        }
+
+        // Fall back to epoll if spin-read didn't get data
         let mut ev = libc::epoll_event {
             events: CLIENT_EVENTS,
             u64: client_fd as u64,
