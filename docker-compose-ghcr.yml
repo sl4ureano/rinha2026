@@ -24,8 +24,10 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.20"
-          memory: 20M
+          cpus: "0.05"
+          memory: 30M
+    logging:
+      driver: none
     networks:
       - rinha
 
@@ -52,14 +54,17 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.40"
-          memory: 165M
+          cpus: "0.475"
+          memory: 120M
+    logging:
+      driver: none
     networks:
       - rinha
 
   api2:
     image: ghcr.io/sl4ureano/rinha2026:last-version
     pull_policy: always
+    network_mode: "none"
     environment:
       - FD_PASS=1
       - INDEX_PATH=/app/data/index.bin
@@ -80,10 +85,10 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.40"
-          memory: 165M
-    networks:
-      - rinha
+          cpus: "0.475"
+          memory: 120M
+    logging:
+      driver: none
 
 volumes:
   sockets:
