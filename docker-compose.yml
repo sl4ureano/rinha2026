@@ -1,12 +1,14 @@
 services:
   lb:
-    image: ghcr.io/sl4ureano/rinha2026:versao-final-c
+    image: ghcr.io/sl4ureano/rinha2026:versao-final-c-v3
     command: ["/app/lb"]
     environment:
       - LB_PORT=9999
       - API1_SOCKET=/tmp/sockets/api1.sock
       - API2_SOCKET=/tmp/sockets/api2.sock
       - CHANNELS_PER_API=8
+      - LB_WORKERS=2
+      - LB_CPU_AFFINITY=2,3
     ports:
       - "9999:9999"
     depends_on:
@@ -20,7 +22,7 @@ services:
       nofile:
         soft: 65535
         hard: 65535
-    cpuset: "2"
+    cpuset: "2,3"
     deploy:
       resources:
         limits:
@@ -30,13 +32,14 @@ services:
       - rinha
 
   api1:
-    image: ghcr.io/sl4ureano/rinha2026:versao-final-c
+    image: ghcr.io/sl4ureano/rinha2026:versao-final-c-v3
     command: ["/app/server"]
     environment:
       - FD_PASS=1
       - INDEX_PATH=/app/data/index.bin
       - CTRL_SOCK=/tmp/sockets/api1.sock
       - PORT=8080
+      - PIN_CPU=0
     healthcheck:
       test: ["CMD", "/app/healthcheck"]
       interval: 1s
@@ -59,13 +62,14 @@ services:
       - rinha
 
   api2:
-    image: ghcr.io/sl4ureano/rinha2026:versao-final-c
+    image: ghcr.io/sl4ureano/rinha2026:versao-final-c-v3
     command: ["/app/server"]
     environment:
       - FD_PASS=1
       - INDEX_PATH=/app/data/index.bin
       - CTRL_SOCK=/tmp/sockets/api2.sock
       - PORT=8080
+      - PIN_CPU=1
     healthcheck:
       test: ["CMD", "/app/healthcheck"]
       interval: 1s
