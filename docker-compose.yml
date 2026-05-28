@@ -1,7 +1,8 @@
 services:
   lb:
-    image: ghcr.io/sl4ureano/rinha2026:a-braba
-    command: ["./lb"]
+    image: ghcr.io/sl4ureano/rinha2026:a-braba-c
+    pull_policy: always
+    command: ["/app/lb"]
     environment:
       - LB_PORT=9999
       - API1_SOCKET=/tmp/sockets/api1.sock
@@ -20,7 +21,7 @@ services:
       nofile:
         soft: 65535
         hard: 65535
-    # Same rationale as docker-compose.yml (siblings: 0/1, 2/3, ...)
+    # Same pinning as local compose (2C/4T sibling-aware).
     cpuset: "1,3"
     deploy:
       resources:
@@ -31,7 +32,9 @@ services:
       - rinha
 
   api1:
-    image: ghcr.io/sl4ureano/rinha2026:a-braba
+    image: ghcr.io/sl4ureano/rinha2026:a-braba-c
+    pull_policy: always
+    command: ["/app/server"]
     environment:
       - FD_PASS=1
       - INDEX_PATH=/app/data/index.bin
@@ -59,7 +62,9 @@ services:
       - rinha
 
   api2:
-    image: ghcr.io/sl4ureano/rinha2026:a-braba
+    image: ghcr.io/sl4ureano/rinha2026:a-braba-c
+    pull_policy: always
+    command: ["/app/server"]
     environment:
       - FD_PASS=1
       - INDEX_PATH=/app/data/index.bin
@@ -97,3 +102,4 @@ volumes:
 networks:
   rinha:
     driver: bridge
+
