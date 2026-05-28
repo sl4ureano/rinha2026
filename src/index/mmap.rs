@@ -33,6 +33,27 @@ unsafe impl Send for Index {}
 unsafe impl Sync for Index {}
 
 impl Index {
+    /// Create a minimal empty index (no file, no mmap). Used in tier-only mode
+    /// where fraud scoring uses heuristics instead of k-NN search.
+    pub fn empty() -> Self {
+        use memmap2::MmapOptions;
+        let mmap = MmapOptions::new().len(1).map_anon().unwrap().make_read_only().unwrap();
+        Self {
+            base: mmap.as_ptr(),
+            _mmap: mmap,
+            len: 0,
+            partitions_off: 0,
+            nodes_off: 0,
+            vectors_off: 0,
+            labels_off: 0,
+            mcc_table_off: 0,
+            part_count: 0,
+            node_count: 0,
+            block_count: 0,
+            part_by_key: [-1i32; 256],
+        }
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         let f = File::open(path).with_context(|| format!("open {}", path.display()))?;
         let mmap = unsafe { Mmap::map(&f) }?;

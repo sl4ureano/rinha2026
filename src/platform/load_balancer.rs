@@ -85,7 +85,7 @@ pub fn run(cfg: LbConfig) {
                 listen_fd,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                libc::SOCK_CLOEXEC,
+                libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
             )
         };
         if client < 0 {
@@ -95,19 +95,8 @@ pub fn run(cfg: LbConfig) {
             }
             continue;
         }
-        set_tcp_nodelay(client);
-        // Disable delayed ACK for faster first-byte response
-        let one_q: libc::c_int = 1;
-        unsafe {
-            libc::setsockopt(client, libc::IPPROTO_TCP, libc::TCP_QUICKACK, &one_q as *const _ as *const _, 4);
-        }
-        // Set non-blocking before passing to API (API side won't have to do it)
-        unsafe {
-            let flags = libc::fcntl(client, libc::F_GETFL, 0);
-            if flags >= 0 {
-                libc::fcntl(client, libc::F_SETFL, flags | libc::O_NONBLOCK);
-            }
-        }
+        // Zero socket options here — API sets them after receiving the fd.
+        // This makes the LB path: accept4 → sendmsg → close (3 syscalls).
 
         let first = (rr_next % upstream_count as u32) as usize;
         rr_next = rr_next.wrapping_add(1);
@@ -158,6 +147,24 @@ fn tcp_listen(port: u16) -> std::io::Result<RawFd> {
             libc::SOL_SOCKET,
             libc::SO_SNDBUF,
             &sndbuf as *const _ as *const _,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+        // TCP_DEFER_ACCEPT: kernel holds conn until data arrives → faster accept
+        let defer: libc::c_int = 1;
+        libc::setsockopt(
+            sock,
+            libc::IPPROTO_TCP,
+            libc::TCP_DEFER_ACCEPT,
+            &defer as *const _ as *const _,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+        // TCP_FASTOPEN: allow data in SYN for new connections
+        let tfo: libc::c_int = 5;
+        libc::setsockopt(
+            sock,
+            libc::IPPROTO_TCP,
+            libc::TCP_FASTOPEN,
+            &tfo as *const _ as *const _,
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         );
     }
