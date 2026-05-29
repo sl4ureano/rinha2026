@@ -1,3 +1,14 @@
+# Mac Mini da prova (i5 Haswell, 2 núcleos / 4 threads):
+#   CPU 0 + 1 = mesmo núcleo físico
+#   CPU 2 + 3 = outro núcleo físico
+#
+# Pinagem:
+#   api1 → CPU 0  (núcleo físico, carga pesada tier_score)
+#   api2 → CPU 2  (outro núcleo físico)
+#   lb   → CPU 1,3 (HT, só accept+fd-pass; quota 0.10 CPU)
+#
+# Quota total: 0.45 + 0.45 + 0.10 = 1.00 CPU | 169+169+8+4 (tmpfs) = 350 MB
+
 x-api: &api-common
   image: ghcr.io/sl4ureano/rinha2026:megazord
   pull_policy: always
@@ -20,7 +31,7 @@ x-api: &api-common
     resources:
       limits:
         cpus: "0.45"
-        memory: 170M
+        memory: 169M
   logging:
     driver: none
 
@@ -71,7 +82,7 @@ services:
       resources:
         limits:
           cpus: "0.10"
-          memory: 10M
+          memory: 8M
     logging:
       driver: none
     networks:
