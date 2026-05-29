@@ -5,12 +5,12 @@
 use std::os::unix::io::RawFd;
 use std::path::Path;
 
-#[cfg(feature = "knn-index")]
 use std::sync::Arc;
 
 use crate::http::response;
+use crate::index::Index;
 use crate::ingest::extract;
-use crate::search::tier_fraud_count;
+use crate::search::{tier_fraud_count, try_fast_fraud_count};
 
 /// Limite de fds rastreados (8k cobre a prova; evita ~512 KiB de tabela estática).
 const MAX_FDS: usize = 8192;
@@ -56,6 +56,7 @@ impl Conn {
 static mut CONNS: [*mut Conn; MAX_FDS] = [std::ptr::null_mut(); MAX_FDS];
 static mut IS_CTRL: [bool; MAX_FDS] = [false; MAX_FDS];
 static mut EPFD: RawFd = -1;
+static mut INDEX_PTR: *const Index = std::ptr::null();
 
 #[inline]
 unsafe fn get_conn(fd: RawFd) -> *mut Conn {
@@ -85,9 +86,9 @@ unsafe fn drop_conn(fd: RawFd) {
 }
 
 /// Direct TCP mode: server listens on TCP port directly (no LB, no fd-passing).
-#[cfg(feature = "knn-index")]
-pub fn run_direct(_index: Arc<crate::index::Index>, port: u16) -> anyhow::Result<()> {
+pub fn run_direct(index: Arc<Index>, port: u16) -> anyhow::Result<()> {
     unsafe {
+        INDEX_PTR = Arc::into_raw(index);
         libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE);
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
@@ -240,7 +241,10 @@ fn create_tcp_listener(port: u16) -> anyhow::Result<RawFd> {
     Ok(fd)
 }
 
-pub fn run(sock_path: &Path) -> anyhow::Result<()> {
+pub fn run(sock_path: &Path, index: Arc<Index>) -> anyhow::Result<()> {
+    unsafe {
+        INDEX_PTR = Arc::into_raw(index);
+    }
     if let Some(parent) = sock_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -692,7 +696,16 @@ unsafe fn send_and_close(fd: RawFd, resp: &[u8]) {
 #[inline]
 fn fraud_response(body: &[u8]) -> &'static [u8] {
     match extract(body) {
-        Some(p) => response::for_count(tier_fraud_count(&p)),
+        Some(p) => {
+            let idx = unsafe { &*INDEX_PTR };
+            // 1. Fast path: obvious legit / obvious fraud (~79% of entries)
+            if let Some(count) = try_fast_fraud_count(idx, &p) {
+                return response::for_count(count);
+            }
+            // 2. Decision tree + ratio fallback (fast, handles the ~21% gray area)
+            //    KNN index stays loaded for future hybrid mode if tree accuracy degrades.
+            response::for_count(tier_fraud_count(&p))
+        }
         None => response::RESP_DENIED_S10,
     }
 }

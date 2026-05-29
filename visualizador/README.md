@@ -1,6 +1,6 @@
 # Rinha Flow — visualizador 3D
 
-Apresentação **lúdica e em tempo real** do fluxo `POST /fraud-score`: load balancer, FD-pass, APIs, `tier_score` (atalhos → árvore → ratio) e métricas da última request.
+Apresentação **lúdica e em tempo real** do fluxo `POST /fraud-score`: load balancer, FD-pass, APIs, pipeline híbrido (fast path → árvore → ratio, com k-NN backup) e métricas da última request.
 
 ## Screenshot
 
@@ -34,21 +34,28 @@ Abra **http://localhost:3333**
 ## Como usar
 
 1. Escolha um exemplo no select ou edite o JSON.
-2. **Enviar** — chama a API real em `:9999` e mostra o trace local (mesma lógica de `tier_score.rs` + árvore em `scripts/decision_tree.nodes`).
+2. **Enviar** — chama a API real em `:9999` e mostra o trace local (mesma lógica do pipeline híbrido: fast path → árvore → ratio).
 3. **Só simular** — trace sem rede (útil se o Docker não estiver no ar).
 4. A cena 3D anima a partícula pelo caminho; o painel direito lista checks, árvore e latências.
 5. Várias abas recebem o mesmo fluxo via **SSE** (`/api/events`).
 
-## Fluxo do `tier_score` (igual ao README principal)
+## Pipeline híbrido (reproduzido em JS)
 
 ```
 JSON extract → Gasto seguro? ─sim→ aprova
                     └─não→ Gasto arriscado? ─sim→ nega
-                              └─não→ Árvore ─┬→ aprova/nega
-                                           └─parse falhou→ Ratio → resposta
+                              └─não→ Árvore (21 features) ─┬→ aprova/nega
+                                                          └─parse falhou→ Ratio → resposta
+
+  [k-NN index: 3M refs, 14 dims — backup em memória, não no hot path]
 ```
 
-Atalhos (verde tracejado na cena) saltam direto para a resposta HTTP.
+O visualizador replica **exatamente** a mesma lógica do pipeline Rust:
+- **Fast path** (atalhos determinísticos) — verde tracejado na cena
+- **Decision tree** (21 features, 1039 nós) — roxo na cena
+- **Ratio fallback** — laranja na cena
+
+O índice k-NN é um componente server-side (AVX2, mmap) e não é simulado no visualizador. No hot path atual, a árvore resolve todos os casos cinza.
 
 ## Integração
 
@@ -61,7 +68,7 @@ Atalhos (verde tracejado na cena) saltam direto para a resposta HTTP.
 | Método | Rota | Descrição |
 |--------|------|-----------|
 | `GET` | `/` | Interface 3D |
-| `GET` | `/api/health` | Status |
+| `GET` | `/api/health` | Status (inclui nº de nós da árvore) |
 | `GET` | `/api/examples` | Payloads de exemplo |
 | `GET` | `/api/events` | SSE — fluxos em tempo real |
 | `POST` | `/api/trace` | Trace + proxy para API real |
