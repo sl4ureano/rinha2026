@@ -10,18 +10,18 @@ Visualizador 3D em tempo real: `visualizador/` (veja [`visualizador/README.md`](
 
 ```mermaid
 flowchart TB
-    C[Cliente / k6] -->|TCP :9999| LB[lb — epoll, round-robin]
+    C[Cliente / k6] -->|TCP :9999| LB[lb — accept bloqueante, round-robin]
 
-    subgraph apis [APIs — 1 thread bloqueante por conexão]
+    subgraph apis [APIs — fd_gateway, 1 thread + epoll]
         API1[server api1]
         API2[server api2]
     end
 
-    LB -->|Unix socket + SCM_RIGHTS| API1
-    LB -->|Unix socket + SCM_RIGHTS| API2
+    LB -->|8× SCM_RIGHTS por API| API1
+    LB -->|8× SCM_RIGHTS por API| API2
 
-    API1 --> R1[HTTP parse → tier_score → resposta estática]
-    API2 --> R2[HTTP parse → tier_score → resposta estática]
+    API1 --> R1[spin-read / epoll → tier_score → HTTP estático]
+    API2 --> R2[spin-read / epoll → tier_score → HTTP estático]
 
     SOCK[(tmpfs /tmp/sockets)]
     LB --- SOCK
@@ -29,7 +29,7 @@ flowchart TB
     API2 --- SOCK
 ```
 
-O LB **não parseia HTTP**. Ele aceita o socket do cliente e envia o file descriptor para a API escolhida; a API lê e escreve na conexão diretamente.
+O **LB não parseia HTTP**: loop `accept4` → `sendmsg(SCM_RIGHTS)` → `close` (`src/platform/load_balancer.rs`). Cada API roda **`fd_gateway`** — uma thread, epoll edge-triggered, spin-read antes do epoll, busy-poll (`EPIOCSPARAMS`) — e classifica com `tier_score` (sem k-NN no runtime da submissão).
 
 ## Scorer em camadas (`tier_score`)
 
@@ -53,7 +53,7 @@ flowchart TD
 | Camada | O que faz |
 |--------|-----------|
 | **Atalhos** | Gasto seguro ou arriscado — resposta imediata (ver abaixo) |
-| **Árvore** | `decision_tree` — 21 features, nós gerados offline |
+| **Árvore** | `decision_tree` — 21 features, ~1040 nós gerados offline |
 | **Ratio** | Fallback só com `amount` e `customer.avg_amount` |
 
 ### Gasto seguro e gasto arriscado
@@ -146,6 +146,8 @@ sequenceDiagram
 docker compose up --build -d
 ```
 
+Imagem publicada + pinagem de CPU (Mac Mini da prova): `docker compose -f docker-compose-ghcr.yml up -d` (`ghcr.io/sl4ureano/rinha2026:megazord`).
+
 Benchmark: [test/README.md](test/README.md) (rede do container do LB).
 
 ```bash
@@ -157,6 +159,8 @@ docker run --rm --user root --network container:rinha2026-lb-1 \
 
 ## Limites Docker (prova)
 
+Quota total: **1,00 CPU** (`0,10 + 0,45 + 0,45`) e **350 MB** de RAM (`169 + 169 + 8 + 4` tmpfs).
+
 ```mermaid
 pie title RAM total 350 MB
     "api1" : 169
@@ -165,26 +169,30 @@ pie title RAM total 350 MB
     "tmpfs sockets" : 4
 ```
 
-| Serviço | CPU | RAM |
-|---------|-----|-----|
-| lb | 0,10 | 8 MB |
-| api1 / api2 | 0,45 | 169 MB cada |
-| volume tmpfs | — | 4 MB |
+| Serviço | CPU | RAM | Notas |
+|---------|-----|-----|--------|
+| lb | 0,10 | 8 MB | `CHANNELS_PER_API=8` → 16 upstreams |
+| api1 | 0,45 | 169 MB | rede `rinha`; healthcheck TCP :8080 |
+| api2 | 0,45 | 169 MB | `network_mode: none` (só Unix) |
+| volume `sockets` | — | 4 MB tmpfs | `/tmp/sockets` |
+
+Pinagem (`docker-compose-ghcr.yml`): api1 → CPU 0, api2 → CPU 2, lb → CPUs 1 e 3 (HT).
 
 ## Variáveis
 
 | Variável | Serviço | Descrição |
 |----------|---------|-----------|
 | `LB_PORT` | lb | Porta pública (9999) |
-| `API1_SOCKET` / `API2_SOCKET` | lb | Upstreams Unix |
-| `CTRL_SOCK` | api | Socket FD-pass |
-| `FD_PASS=1` | api | Ativa modo FD-pass |
-| `INDEX_PATH` | api | Índice mmap (boot / healthcheck) |
-| `PORT` | api | Healthcheck TCP |
+| `API1_SOCKET` / `API2_SOCKET` | lb | Paths dos sockets Unix das APIs |
+| `CHANNELS_PER_API` | lb | Canais duplicados por API (padrão **8**) |
+| `CTRL_SOCK` | api | Socket de controle FD-pass |
+| `FD_PASS=1` | api | Modo submissão (tier-only, sem mmap de índice) |
+| `PORT` | api | Porta do healthcheck TCP (`/ready`) |
+| `INDEX_PATH` | api | Só builds com `knn-index` / tooling offline |
 
 ## Build do índice (tooling)
 
-Runtime usa `tier_score`; `build-index` gera `data/index.bin` para healthcheck e ferramentas legadas:
+Runtime da submissão usa só `tier_score` (Dockerfile com `--features submission`, sem `index.bin` na imagem). `build-index` gera `data/index.bin` para ferramentas offline e builds legados com k-NN:
 
 ```bash
 cargo run --release --bin build-index -- resources data/index.bin
