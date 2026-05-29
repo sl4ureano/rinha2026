@@ -1,7 +1,56 @@
+# Mesmo layout de docker-compose.submission.yml (Mac Mini / cpuset).
+# Teste local: docker compose -f docker-compose-ghcr.yml up -d
+
+x-api: &api-common
+  image: ghcr.io/sl4ureano/rinha2026:megazord
+  pull_policy: always
+  environment:
+    - FD_PASS=1
+    - PORT=8080
+  healthcheck:
+    test: ["CMD", "/app/healthcheck"]
+    interval: 1s
+    timeout: 1s
+    retries: 30
+    start_period: 15s
+  volumes:
+    - sockets:/tmp/sockets
+  ulimits:
+    nofile:
+      soft: 65535
+      hard: 65535
+  deploy:
+    resources:
+      limits:
+        cpus: "0.45"
+        memory: 170M
+  logging:
+    driver: none
+
 services:
+  api1:
+    <<: *api-common
+    cpuset: "0"
+    environment:
+      - FD_PASS=1
+      - CTRL_SOCK=/tmp/sockets/api1.sock
+      - PORT=8080
+    networks:
+      - rinha
+
+  api2:
+    <<: *api-common
+    cpuset: "2"
+    network_mode: "none"
+    environment:
+      - FD_PASS=1
+      - CTRL_SOCK=/tmp/sockets/api2.sock
+      - PORT=8080
+
   lb:
     image: ghcr.io/sl4ureano/rinha2026:megazord
     pull_policy: always
+    cpuset: "1,3"
     command: ["./lb"]
     environment:
       - LB_PORT=9999
@@ -30,63 +79,6 @@ services:
       driver: none
     networks:
       - rinha
-
-  api1:
-    image: ghcr.io/sl4ureano/rinha2026:megazord
-    pull_policy: always
-    environment:
-      - FD_PASS=1
-      - CTRL_SOCK=/tmp/sockets/api1.sock
-      - PORT=8080
-    healthcheck:
-      test: ["CMD", "/app/healthcheck"]
-      interval: 1s
-      timeout: 1s
-      retries: 30
-      start_period: 15s
-    volumes:
-      - sockets:/tmp/sockets
-    ulimits:
-      nofile:
-        soft: 65535
-        hard: 65535
-    deploy:
-      resources:
-        limits:
-          cpus: "0.45"
-          memory: 170M
-    logging:
-      driver: none
-    networks:
-      - rinha
-
-  api2:
-    image: ghcr.io/sl4ureano/rinha2026:megazord
-    pull_policy: always
-    network_mode: "none"
-    environment:
-      - FD_PASS=1
-      - CTRL_SOCK=/tmp/sockets/api2.sock
-      - PORT=8080
-    healthcheck:
-      test: ["CMD", "/app/healthcheck"]
-      interval: 1s
-      timeout: 1s
-      retries: 30
-      start_period: 15s
-    volumes:
-      - sockets:/tmp/sockets
-    ulimits:
-      nofile:
-        soft: 65535
-        hard: 65535
-    deploy:
-      resources:
-        limits:
-          cpus: "0.45"
-          memory: 170M
-    logging:
-      driver: none
 
 volumes:
   sockets:
