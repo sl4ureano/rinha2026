@@ -2,12 +2,13 @@
 FROM rust:1.84-bookworm AS app-builder
 
 WORKDIR /app
-ENV RUSTFLAGS="-C target-cpu=native -C opt-level=3"
+# Haswell ≈ Mac Mini da prova (linux-amd64); submission = sem k-NN/monoio no server.
+ENV RUSTFLAGS="-C target-cpu=haswell -C opt-level=3"
 
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 
-RUN cargo build --release --bin server --bin healthcheck --bin lb
+RUN cargo build --release --bin server --bin healthcheck --bin lb --no-default-features --features submission
 
 
 ## Stage 2: runtime (lean — no 99MB index)

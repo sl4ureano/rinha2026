@@ -32,13 +32,14 @@ rs_lines = [
     "pub const LEAF: u8 = 255;",
     "pub const FEATURE_COUNT: usize = 21;",
     "",
+    "#[repr(C)]",
     "#[derive(Copy, Clone)]",
     "pub struct Node {",
     "    pub feature: u8,",
     "    pub threshold: f32,",
     "    pub left: i16,",
     "    pub right: i16,",
-    "    pub fraud: bool,",
+    "    pub fraud: u8,",
     "}",
     "",
     "#[inline]",
@@ -46,8 +47,8 @@ rs_lines = [
     "    let mut index: usize = 0;",
     "    loop {",
     "        let node = &NODES[index];",
-    "        if node.feature == LEAF {",
-    "            return node.fraud;",
+        "        if node.feature == LEAF {",
+        "            return node.fraud != 0;",
     "        }",
     "        let v = features[node.feature as usize];",
     "        let next = if v <= node.threshold { node.left } else { node.right };",
@@ -59,7 +60,7 @@ rs_lines = [
 ]
 for feat, th, _, le, ri, fr in nodes:
     rs_lines.append(
-        f"    Node {{ feature: {feat}, threshold: {th}, left: {le}, right: {ri}, fraud: {str(fr).lower()} }},"
+        f"    Node {{ feature: {feat}, threshold: {th}, left: {le}, right: {ri}, fraud: {1 if fr else 0} }},"
     )
 rs_lines.append("];")
 (ROOT / "src/search/decision_tree.rs").write_text("\n".join(rs_lines) + "\n")

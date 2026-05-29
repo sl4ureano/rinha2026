@@ -1,10 +1,18 @@
-//! Exact k-nearest-neighbor search over the partitioned KD-tree.
+//! Classificação: tier_score (submissão) + k-NN opcional (ferramentas).
 
 mod decision_tree;
-mod fast_path;
-mod knn;
 mod tier_score;
 
-pub use fast_path::try_fast_fraud_count;
-pub use knn::fraud_count;
+#[cfg(feature = "knn-index")]
+mod fast_path;
+
+#[cfg(feature = "knn-index")]
+mod knn;
+
 pub use tier_score::{ratio_only_count, tier_fraud_count, tier_path, tree_only_count, TierPath};
+
+#[cfg(feature = "knn-index")]
+pub use fast_path::try_fast_fraud_count;
+
+#[cfg(feature = "knn-index")]
+pub use knn::fraud_count;

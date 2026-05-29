@@ -4,14 +4,16 @@
 
 use std::os::unix::io::RawFd;
 use std::path::Path;
+
+#[cfg(feature = "knn-index")]
 use std::sync::Arc;
 
 use crate::http::response;
-use crate::index::Index;
 use crate::ingest::extract;
 use crate::search::tier_fraud_count;
 
-const MAX_FDS: usize = 65536;
+/// Limite de fds rastreados (8k cobre a prova; evita ~512 KiB de tabela estática).
+const MAX_FDS: usize = 8192;
 const MAX_EVENTS: i32 = 512;
 const BUF_CAP: usize = 8192;
 const CTRL_LISTEN_TOKEN: u64 = u64::MAX;
@@ -54,7 +56,6 @@ impl Conn {
 static mut CONNS: [*mut Conn; MAX_FDS] = [std::ptr::null_mut(); MAX_FDS];
 static mut IS_CTRL: [bool; MAX_FDS] = [false; MAX_FDS];
 static mut EPFD: RawFd = -1;
-static mut INDEX: *const Index = std::ptr::null();
 
 #[inline]
 unsafe fn get_conn(fd: RawFd) -> *mut Conn {
@@ -84,9 +85,9 @@ unsafe fn drop_conn(fd: RawFd) {
 }
 
 /// Direct TCP mode: server listens on TCP port directly (no LB, no fd-passing).
-pub fn run_direct(index: Arc<Index>, port: u16) -> anyhow::Result<()> {
+#[cfg(feature = "knn-index")]
+pub fn run_direct(_index: Arc<crate::index::Index>, port: u16) -> anyhow::Result<()> {
     unsafe {
-        INDEX = Arc::into_raw(index);
         libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE);
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
@@ -239,18 +240,14 @@ fn create_tcp_listener(port: u16) -> anyhow::Result<RawFd> {
     Ok(fd)
 }
 
-pub fn run(index: Arc<Index>, sock_path: &Path) -> anyhow::Result<()> {
+pub fn run(sock_path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = sock_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let _ = std::fs::remove_file(sock_path);
 
     unsafe {
-        INDEX = Arc::into_raw(index);
-
-        // mlockall for memory pinning
         libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE);
-
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
 
