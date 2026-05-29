@@ -1,5 +1,13 @@
-# Mesmo layout de docker-compose.submission.yml (Mac Mini / cpuset).
-# Teste local: docker compose -f docker-compose-ghcr.yml up -d
+# Mac Mini da prova (i5 Haswell, 2 núcleos / 4 threads):
+#   CPU 0 + 1 = mesmo núcleo físico
+#   CPU 2 + 3 = outro núcleo físico
+#
+# Pinagem:
+#   api1 → CPU 0  (núcleo físico, carga pesada tier_score)
+#   api2 → CPU 2  (outro núcleo físico)
+#   lb   → CPU 1,3 (HT, só accept+fd-pass; quota 0.10 CPU)
+#
+# Quota total: 0.45 + 0.45 + 0.10 = 1.00 CPU | 170+170+10 = 350 MB
 
 x-api: &api-common
   image: ghcr.io/sl4ureano/rinha2026:megazord

@@ -192,4 +192,4 @@ cargo run --release --bin build-index -- resources data/index.bin
 
 ## Versão em C
 
-[VERSAO-c/README.md](VERSAO-c/README.md) — mesma arquitetura e scorer, implementação C11.
+Implementação **C11** do mesmo desenho (lb → FD-pass → scorer `tier_score`): repositório separado em [github.com/adsanla/rinha2026](https://github.com/adsanla/rinha2026).

@@ -1,4 +1,4 @@
-//! HTTP bloqueante por conexão (pthread-style, como VERSAO-c).
+//! HTTP bloqueante por conexão (pthread-style).
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
