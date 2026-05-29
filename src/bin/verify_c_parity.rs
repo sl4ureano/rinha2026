@@ -35,10 +35,11 @@ fn c_tier(tier_one: &PathBuf, body: &[u8]) -> Option<u8> {
 }
 
 fn main() {
-    let tier_one = env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("VERSAO-c/tier_one"));
+    let Some(tier_one) = env::args().nth(1).map(PathBuf::from) else {
+        eprintln!("usage: verify-c-parity <tier_one> [test-data.json]");
+        eprintln!("build tier_one from https://github.com/adsanla/rinha2026");
+        std::process::exit(1);
+    };
 
     let data_path = env::args()
         .nth(2)
