@@ -12,17 +12,13 @@ fn main() {
         if let Some(ctrl_sock) = &cfg.ctrl_sock {
             let port = cfg.health_port;
             std::thread::spawn(move || fraud_detector::http::health::health_tcp_loop(port));
-            fraud_detector::platform::fd_gateway::run(ctrl_sock.as_path())
+            let index = load_index(&cfg);
+            fraud_detector::platform::fd_gateway::run(ctrl_sock.as_path(), index)
                 .unwrap_or_else(|e| panic!("fd_gateway: {e}"));
             return;
         }
 
-        #[cfg(feature = "knn-index")]
         if let Ok(port_str) = std::env::var("DIRECT_PORT") {
-            use std::sync::Arc;
-
-            use fraud_detector::index::Index;
-
             let port: u16 = port_str.parse().expect("DIRECT_PORT must be a u16");
             let index = load_index(&cfg);
             fraud_detector::platform::fd_gateway::run_direct(index, port)
@@ -64,7 +60,7 @@ fn load_index(cfg: &ServerConfig) -> std::sync::Arc<fraud_detector::Index> {
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false)
         }
-        env_truthy("TIER_ONLY") || env_truthy("SKIP_INDEX") || env_truthy("FD_PASS")
+        env_truthy("TIER_ONLY") || env_truthy("SKIP_INDEX")
     }
 
     if tier_only_mode() {

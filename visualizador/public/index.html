@@ -20,7 +20,7 @@
         <span class="logo">⚡</span>
         <div>
           <h1>Rinha Flow</h1>
-          <p>POST /fraud-score em 3D — tempo real</p>
+          <p>POST /fraud-score em 3D — pipeline híbrido — tempo real</p>
         </div>
       </div>
       <div class="status-pills">
@@ -41,7 +41,8 @@
       <select id="examples"></select>
       <p class="hint">
         Com <code>docker compose up</code>, a API fica em <code>:9999</code>. O visualizador replica o
-        <code>tier_score</code> em JS e mostra o caminho (atalho, árvore ou ratio).
+        pipeline híbrido em JS: fast path (atalhos) → árvore (21 features) → ratio. O índice k-NN
+        (3M refs, 14 dims) fica como backup server-side.
       </p>
     </aside>
 
@@ -73,7 +74,7 @@
 
     <footer class="hud bottom">
       <span id="legend"></span>
-      <span class="credit">Integrado ao projeto Rinha 2026 — fraud-detector</span>
+      <span class="credit">Rinha 2026 — fraud-detector hybrid (fast path + tree + k-NN backup)</span>
     </footer>
 
     <script type="importmap">

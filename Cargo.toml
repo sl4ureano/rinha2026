@@ -9,8 +9,8 @@ path = "src/lib.rs"
 
 [features]
 default = ["submission"]
-# Imagem Docker / Rinha: só tier + fd_gateway (sem k-NN, sem monoio).
-submission = []
+# Imagem Docker / Rinha: tier + fd_gateway + k-NN (hybrid scoring).
+submission = ["knn-index"]
 # Ferramentas e modo TCP com índice mmap.
 knn-index = ["dep:memmap2"]
 monoio-http = ["dep:monoio", "dep:socket2", "knn-index"]
