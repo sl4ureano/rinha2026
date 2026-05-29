@@ -3,6 +3,9 @@ data/ivf_index.bin
 data/index.bin
 data/blob.bin
 
+# saída C padrão de scripts/gen_decision_tree.py (use C_TREE_DIR para repo externo)
+/c-tree/
+
 # artefatos locais
 /_ref/
 /versionPython/
