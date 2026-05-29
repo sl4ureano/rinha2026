@@ -67,10 +67,17 @@ mas com estrutura de splits diferente nas regiões que dependem de features 16/1
 
 Para reprodução EXATA, é necessário:
   - Os payloads brutos originais (com amount_ratio e customer_avg reais)
-  - OU o gerador de dados sintéticos com o mesmo seed
+  - OU o gerador oficial com o mesmo seed:
+    https://github.com/zanfranceschi/rinha-de-backend-2026/tree/main/data-generator
+    (--refs 3000000 --refs-seed 42 --fraud-ratio-refs 0.30)
+
+Uso recomendado (features brutas 16/17 corretas):
+  python scripts/train_decision_tree.py --from-generator 3000000
+  python scripts/gen_decision_tree.py
 """
 from __future__ import annotations
 
+import argparse
 import gzip
 import json
 import pathlib
@@ -255,7 +262,47 @@ def write_nodes_file(nodes, path: pathlib.Path):
     print(f"Escrito: {path}")
 
 
+def load_from_generator(n: int, seed: int, fraud_ratio: float):
+    """Gera n transações sintéticas (port do data-generator C) com payloads brutos."""
+    from synthetic_data import generate_references, request_to_dict
+    from train_from_payloads import build_21_features
+
+    print(f"\nGerando {n} transações sintéticas (seed={seed}, fraud_ratio={fraud_ratio}) ...")
+    t0 = time.time()
+    features_list = []
+    labels_list = []
+    skipped = 0
+    high_ratio = 0
+    for req, _vec14, label in generate_references(n, seed=seed, fraud_ratio=fraud_ratio):
+        feats = build_21_features(request_to_dict(req))
+        if feats is None:
+            skipped += 1
+            continue
+        features_list.append(feats)
+        labels_list.append(1 if label == "fraud" else 0)
+        if feats[17] > 10:
+            high_ratio += 1
+    X = np.array(features_list, dtype=np.float32)
+    y = np.array(labels_list, dtype=np.int8)
+    print(f"  {X.shape[0]} entries em {time.time()-t0:.1f}s (skipped={skipped})")
+    print(f"  legit={int((y==0).sum())}  fraud={int((y==1).sum())}")
+    print(f"  Entries com ratio > 10 (feature 17): {high_ratio}")
+    print(f"  Entries com ratio > 35 (feature 17): {int((X[:, 17] > 35).sum())}")
+    return X, y
+
+
 def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument(
+        "--from-generator", type=int, metavar="N", default=0,
+        help="Gera N payloads via synthetic_data.py (recomendado: 3000000, seed 42)",
+    )
+    ap.add_argument("--seed", type=int, default=42, help="RNG seed (default: 42 = REF_SEED do C)")
+    ap.add_argument("--fraud-ratio", type=float, default=0.30, help="Fração de fraud (default: 0.30)")
+    ap.add_argument("--max-leaf-nodes", type=int, default=520)
+    ap.add_argument("--random-state", type=int, default=42)
+    args = ap.parse_args()
+
     try:
         from sklearn.tree import DecisionTreeClassifier
     except ImportError:
@@ -263,16 +310,18 @@ def main():
         subprocess.check_call([sys.executable, "-m", "pip", "install", "scikit-learn"])
         from sklearn.tree import DecisionTreeClassifier
 
-    # 1. Carregar dados
-    v14, labels = load_references(RESOURCES / "references.json.gz")
-
-    # 2. Expandir para 21 features
-    print("\nExpandindo 14 → 21 features ...")
-    X = expand_to_21(v14)
-    y = labels
-    print(f"  Shape: {X.shape}")
-    print(f"  Entries com v[2]=1.0 (ratio clampado): {int((v14[:, 2] == 1.0).sum())}")
-    print(f"  Entries com v[0]=1.0 (amount clampado): {int((v14[:, 0] == 1.0).sum())}")
+    # 1. Carregar ou gerar dados
+    if args.from_generator > 0:
+        X, y = load_from_generator(args.from_generator, args.seed, args.fraud_ratio)
+    else:
+        v14, labels = load_references(RESOURCES / "references.json.gz")
+        print("\nExpandindo 14 → 21 features (aproximação — ratio clampado se perde) ...")
+        X = expand_to_21(v14)
+        y = labels
+        print(f"  Shape: {X.shape}")
+        print(f"  Entries com v[2]=1.0 (ratio clampado): {int((v14[:, 2] == 1.0).sum())}")
+        print(f"  Entries com v[0]=1.0 (amount clampado): {int((v14[:, 0] == 1.0).sum())}")
+        print("\n  Dica: use --from-generator 3000000 para features brutas 16/17 corretas.")
 
     # 3. Carregar árvore existente
     existing_nodes = parse_existing_nodes(ROOT / "scripts" / "decision_tree.nodes")
@@ -281,11 +330,11 @@ def main():
     print(f"Features usadas: {sorted(used)}")
 
     # 4. Treinar com parâmetros conhecidos
-    print("\n=== Treinando: gini, max_leaf_nodes=520, random_state=42 ===")
+    print(f"\n=== Treinando: gini, max_leaf_nodes={args.max_leaf_nodes}, random_state={args.random_state} ===")
     clf = DecisionTreeClassifier(
         criterion="gini",
-        max_leaf_nodes=520,
-        random_state=42,
+        max_leaf_nodes=args.max_leaf_nodes,
+        random_state=args.random_state,
     )
     clf.fit(X, y)
     gen_nodes = sklearn_tree_to_nodes(clf)
@@ -295,13 +344,15 @@ def main():
     match = compare_nodes(existing_nodes, gen_nodes)
 
     if match:
-        print("\n✓ Árvores IDÊNTICAS!")
+        print("\nOK - Arvores IDENTICAS!")
     else:
-        print("\n✗ Árvores DIFERENTES (esperado com features 16/17 aproximadas)")
+        print("\nX Arvores DIFERENTES")
+        if args.from_generator <= 0:
+            print("  (esperado com features 16/17 aproximadas a partir de references.json.gz)")
         print("\nPara reprodução idêntica, é necessário:")
         print("  1. Os payloads brutos originais (com customer_avg_amount e amount_ratio reais)")
-        print("  2. OU o gerador de dados sintéticos com o mesmo seed")
-        print("  3. Hiperparâmetros: criterion='gini', max_leaf_nodes=520, random_state=42")
+        print("  2. OU o gerador oficial: --from-generator 3000000 --seed 42")
+        print(f"  3. Hiperparâmetros: max_leaf_nodes={args.max_leaf_nodes}, random_state={args.random_state}")
 
     # Salvar a versão gerada para comparação
     out_path = ROOT / "scripts" / "decision_tree_generated.nodes"
