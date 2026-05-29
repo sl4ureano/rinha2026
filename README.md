@@ -187,9 +187,138 @@ O script `scripts/gen_decision_tree.py` converte `scripts/decision_tree.nodes` (
 - **Rust**: `src/search/decision_tree.rs` — array estático `NODES` + `fn predict()`
 - **C**: `c-tree/{include,src}/decision_tree.{h,c}`
 
+### Pipeline offline: gerar dados → treinar → compilar
+
+A árvore em produção usa **21 features**, das quais 16–17 são valores brutos (`customer_avg_amount`, `amount_ratio`) que **não** estão em `references.json.gz` (só 14 dims normalizadas). Por isso o treino precisa partir de **payloads brutos** ou do **gerador sintético** — não basta expandir o `.json.gz`.
+
+```mermaid
+flowchart LR
+    GEN["Gerador de dados<br/>C oficial ou synthetic_data.py"]
+    RAW["Payloads brutos<br/>+ labels fraud/legit"]
+    TRAIN["train_decision_tree.py<br/>sklearn, 520 folhas"]
+    NODES["decision_tree.nodes"]
+    CODE["gen_decision_tree.py<br/>.rs + .c"]
+    REFS["references.json.gz<br/>14 dims → k-NN"]
+
+    GEN --> RAW
+    GEN --> REFS
+    RAW --> TRAIN
+    TRAIN --> NODES
+    NODES --> CODE
+
+    style GEN fill:#3498db,color:#fff,stroke:#2980b9
+    style RAW fill:#3498db,color:#fff,stroke:#2980b9
+    style TRAIN fill:#f39c12,color:#fff,stroke:#e67e22
+    style NODES fill:#9b59b6,color:#fff,stroke:#8e44ad
+    style CODE fill:#2ecc71,color:#fff,stroke:#27ae60
+    style REFS fill:#95a5a6,color:#fff,stroke:#7f8c8d
+```
+
+**Pré-requisitos:** Python 3.10+, `pip install scikit-learn numpy`. Configs em `resources/normalization.json` e `resources/mcc_risk.json`.
+
+#### 1. Gerar dados sintéticos
+
+Gerador oficial (C, repositório da prova): [zanfranceschi/rinha-de-backend-2026/data-generator](https://github.com/zanfranceschi/rinha-de-backend-2026/tree/main/data-generator)
+
+```bash
+cd data-generator && make
+
+# Referências para o índice k-NN (3M × 14 dims)
+./data-generator \
+  --refs 3000000 \
+  --refs-seed 42 \
+  --fraud-ratio-refs 0.30 \
+  --norm-cfg ../resources/normalization.json \
+  --mcc-cfg ../resources/mcc_risk.json \
+  --refs-out ../resources/references.json
+
+gzip -k ../resources/references.json   # → references.json.gz
+
+# Payloads de teste (k6 / verify-tier)
+./data-generator \
+  --payloads 54100 \
+  --payloads-seed 4242 \
+  --fraud-ratio-payloads 0.30 \
+  --randomize-payload-dates \
+  --reuse-refs --refs-in ../resources/references.json \
+  --payloads-out ../test/test-data.json
+```
+
+Port Python equivalente (sem compilar C): `scripts/synthetic_data.py`
+
+```bash
+# Verificar amostra contra example-references.json
+python scripts/synthetic_data.py --verify resources/example-references.json --n-check 100
+
+# Inspecionar uma transação gerada
+python scripts/synthetic_data.py
+```
+
+| Parâmetro | Valor padrão | Uso |
+|-----------|:------------:|-----|
+| `--refs-seed` / `REF_SEED` | **42** | Referências + treino da árvore |
+| `--payloads-seed` / `PAY_SEED` | **4242** | Payloads de teste da prova |
+| `--fraud-ratio-*` | **0.30** | 70% legit, 27% fraud, 3% borderline |
+| `--refs` | 200 (demo) / **3000000** (produção) | Tamanho do índice k-NN |
+
+#### 2. Treinar a árvore
+
+**Recomendado** — gera payloads em memória com features brutas 16/17 corretas:
+
+```bash
+python scripts/train_decision_tree.py --from-generator 3000000
+```
+
+Opções úteis:
+
+```bash
+python scripts/train_decision_tree.py \
+  --from-generator 3000000 \
+  --seed 42 \
+  --fraud-ratio 0.30 \
+  --max-leaf-nodes 520 \
+  --random-state 42
+```
+
+**Alternativa** — a partir de JSON com payloads completos (formato `test/test-data.json`):
+
+```bash
+python scripts/train_from_payloads.py test/test-data.json \
+  --max-leaf-nodes 520 \
+  --random-state 42 \
+  --output scripts/decision_tree.nodes
+```
+
+**Aproximação (não reproduz a árvore atual)** — só `references.json.gz`, perde ratios > 10:
+
+```bash
+python scripts/train_decision_tree.py
+```
+
+Hiperparâmetros fixos do sklearn: `criterion='gini'`, `max_leaf_nodes=520`, `random_state=42` → **1039 nós** (520 folhas + 519 internos).
+
+#### 3. Compilar para Rust e C
+
 ```bash
 python scripts/gen_decision_tree.py          # gera .rs e .c
-python scripts/gen_decision_tree.py --rust-only  # só Rust
+python scripts/gen_decision_tree.py --rust-only  # só src/search/decision_tree.rs
+```
+
+Recompilar a API após alterar a árvore:
+
+```bash
+cargo build --release --features submission
+```
+
+#### Resumo rápido (do zero)
+
+```bash
+pip install scikit-learn numpy
+
+# Treinar + exportar .nodes (usa gerador Python, ~5–15 min com 3M)
+python scripts/train_decision_tree.py --from-generator 3000000
+python scripts/gen_decision_tree.py
+cargo build --release --features submission
 ```
 
 ---
