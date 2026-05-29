@@ -25,7 +25,7 @@ services:
       resources:
         limits:
           cpus: "0.10"
-          memory: 10M
+          memory: 8M
     logging:
       driver: none
     networks:
@@ -54,7 +54,7 @@ services:
       resources:
         limits:
           cpus: "0.45"
-          memory: 170M
+          memory: 169M
     logging:
       driver: none
     networks:
@@ -84,7 +84,7 @@ services:
       resources:
         limits:
           cpus: "0.45"
-          memory: 170M
+          memory: 169M
     logging:
       driver: none
 
