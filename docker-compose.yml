@@ -43,6 +43,7 @@ services:
       - FD_PASS=1
       - CTRL_SOCK=/tmp/sockets/api1.sock
       - PORT=8080
+      - TIER_ONLY=1
     networks:
       - rinha
 
@@ -54,6 +55,7 @@ services:
       - FD_PASS=1
       - CTRL_SOCK=/tmp/sockets/api2.sock
       - PORT=8080
+      - TIER_ONLY=1
 
   lb:
     image: ghcr.io/sl4ureano/rinha2026:oraculo
