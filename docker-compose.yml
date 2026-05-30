@@ -10,7 +10,7 @@
 # Quota total: 0.45 + 0.45 + 0.10 = 1.00 CPU | 169+169+8+4 (tmpfs) = 350 MB
 
 x-api: &api-common
-  image: ghcr.io/sl4ureano/rinha2026:oraculo
+  image: ghcr.io/sl4ureano/rinha2026:megazord
   pull_policy: always
   environment:
     - FD_PASS=1
@@ -56,7 +56,7 @@ services:
       - PORT=8080
 
   lb:
-    image: ghcr.io/sl4ureano/rinha2026:oraculo
+    image: ghcr.io/sl4ureano/rinha2026:megazord
     pull_policy: always
     cpuset: "1,3"
     command: ["./lb"]
