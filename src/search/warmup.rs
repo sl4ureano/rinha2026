@@ -1,7 +1,8 @@
 //! Boot warmup: prime CPU caches and branch predictors before accepting traffic.
 
-use crate::ingest::extract;
-use crate::search::{complete_cache, tier_gray_count, try_fast_fraud_count};
+use crate::index::Index;
+
+use super::score_http_count;
 
 const DEFAULT_WARMUP: usize = 4096;
 
@@ -21,21 +22,14 @@ fn warmup_count() -> usize {
 }
 
 /// Run `WARMUP_QUERIES` (default 4096) scoring iterations before serving.
-pub fn run_warmup() {
+pub fn run_warmup(index: &Index) {
     let n = warmup_count();
     if n == 0 {
         return;
     }
     let bodies = BODIES.len();
     for i in 0..n {
-        let body = BODIES[i % bodies];
-        if let Some(p) = extract(body) {
-            let mut p = p;
-            complete_cache(&mut p);
-            if try_fast_fraud_count(&p).is_none() {
-                let _ = tier_gray_count(&p);
-            }
-        }
+        let _ = score_http_count(index, BODIES[i % bodies]);
     }
-    eprintln!("warmup: {n} queries");
+    eprintln!("warmup: {n} queries (knn_blocks={})", index.block_count());
 }

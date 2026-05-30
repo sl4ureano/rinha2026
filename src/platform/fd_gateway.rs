@@ -9,8 +9,7 @@ use std::sync::Arc;
 
 use crate::http::response;
 use crate::index::Index;
-use crate::ingest::extract;
-use crate::search::{complete_cache, run_warmup, tier_gray_count, try_fast_fraud_count};
+use crate::search::{run_warmup, score_http_count};
 
 /// Limite de fds rastreados (8k cobre a prova; evita ~512 KiB de tabela estática).
 const MAX_FDS: usize = 8192;
@@ -178,7 +177,7 @@ pub fn run_direct(index: Arc<Index>, port: u16) -> anyhow::Result<()> {
         };
         libc::epoll_ctl(EPFD, libc::EPOLL_CTL_ADD, tcp_fd, &mut ev);
 
-        run_warmup();
+        run_warmup(index_ref());
         event_loop_direct(tcp_fd);
     }
 }
@@ -339,7 +338,7 @@ pub fn run(sock_path: &Path, index: Arc<Index>, health_port: u16) -> anyhow::Res
         ev.u64 = HEALTH_LISTEN_TOKEN;
         libc::epoll_ctl(EPFD, libc::EPOLL_CTL_ADD, health_fd, &mut ev);
 
-        run_warmup();
+        run_warmup(index_ref());
         event_loop(ctrl_listen_fd, health_fd);
     }
 }
@@ -745,15 +744,15 @@ unsafe fn send_and_close(fd: RawFd, resp: &[u8]) {
 }
 
 #[inline]
+unsafe fn index_ref() -> &'static Index {
+    debug_assert!(!INDEX_PTR.is_null());
+    &*INDEX_PTR
+}
+
+#[inline]
 fn fraud_response(body: &[u8]) -> &'static [u8] {
-    match extract(body) {
-        Some(mut p) => {
-            if let Some(count) = try_fast_fraud_count(&p) {
-                return response::for_count(count);
-            }
-            complete_cache(&mut p);
-            response::for_count(tier_gray_count(&p))
-        }
+    match score_http_count(unsafe { index_ref() }, body) {
+        Some(count) => response::for_count(count),
         None => response::RESP_DENIED_S10,
     }
 }

@@ -1,7 +1,7 @@
 //! Separa tree=0 vs tree=5 quando ratio_count=5 (caminho tree).
 //! Busca regras 100% precisas para expandir fast_path.
 
-use fraud_detector::ingest::extract;
+use fraud_detector::ingest::extract_filled;
 use fraud_detector::search::{
     complete_cache, tier_path, tree_only_count, try_fast_fraud_count, TierPath,
 };
@@ -48,7 +48,7 @@ fn main() {
 
     for entry in &file.entries {
         let body = serde_json::to_vec(&entry.request).unwrap();
-        let Some(mut p) = extract(&body) else {
+        let Some(mut p) = extract_filled(&body) else {
             continue;
         };
         if try_fast_fraud_count(&p).is_some() {

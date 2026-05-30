@@ -1,5 +1,5 @@
 use crate::index::Index;
-use crate::ingest::extract;
+use crate::ingest::extract_filled;
 use crate::search::tier_fraud_count;
 use crate::http::response;
 use monoio::io::{AsyncReadRent, AsyncWriteRentExt};
@@ -114,7 +114,7 @@ where
 
 #[inline]
 fn fraud_response(_index: &Index, body: &[u8]) -> &'static [u8] {
-    match extract(body) {
+    match extract_filled(body) {
         Some(p) => response::for_count(tier_fraud_count(&p)),
         None => response::RESP_DENIED_S10,
     }

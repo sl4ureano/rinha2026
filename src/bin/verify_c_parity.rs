@@ -1,6 +1,6 @@
 //! Lista índices onde tier Rust (serde) != tier C (tier_one).
 
-use fraud_detector::ingest::extract;
+use fraud_detector::ingest::extract_filled;
 use fraud_detector::search::tier_fraud_count;
 use std::env;
 use std::fs;
@@ -52,7 +52,7 @@ fn main() {
     let mut diffs = 0u64;
     for (i, entry) in file.entries.iter().enumerate() {
         let body = serde_json::to_vec(&entry.request).unwrap();
-        let rust_c = tier_fraud_count(extract(&body).as_ref().unwrap());
+        let rust_c = tier_fraud_count(extract_filled(&body).as_ref().unwrap());
         let Some(c_c) = c_tier(&tier_one, &body) else {
             eprintln!("tier_one failed at {i}");
             continue;

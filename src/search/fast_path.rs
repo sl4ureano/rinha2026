@@ -14,13 +14,22 @@ const MIN_INSTALLMENTS_FRAUD: u32 = 5;
 const MIN_TX24H_FRAUD: u32 = 6;
 const MIN_KM_HOME_FRAUD: f32 = 150.0;
 
-/// Soma de labels dos top-5 vizinhos (0–5), igual a `fraud_count`, ou `None` → usar k-NN.
-pub fn try_fast_fraud_count(p: &RawPayload<'_>) -> Option<u8> {
+/// Gasto seguro / arriscado sem precisar de `parse_iso` (só `fill_base`).
+#[inline]
+pub fn try_obvious_count(p: &RawPayload<'_>) -> Option<u8> {
     if obvious_legit(p) {
         return Some(0);
     }
     if obvious_fraud(p) {
         return Some(5);
+    }
+    None
+}
+
+/// Atalhos até soft-tree; chamar `cache::fill_datetime` antes se precisar de gray/ratio.
+pub fn try_fast_fraud_count(p: &RawPayload<'_>) -> Option<u8> {
+    if let Some(c) = try_obvious_count(p) {
+        return Some(c);
     }
     if p.cache.gray_ratio_only {
         return Some(p.cache.ratio_count);

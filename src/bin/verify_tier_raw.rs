@@ -1,6 +1,6 @@
 //! Compara tier no JSON bruto do arquivo vs corpo re-serializado (como k6 / verify-tier).
 
-use fraud_detector::ingest::extract;
+use fraud_detector::ingest::extract_filled;
 use fraud_detector::search::tier_fraud_count;
 use std::env;
 use std::fs;
@@ -86,8 +86,8 @@ fn main() {
             .map(|s| s.as_bytes().to_vec())
             .unwrap_or_default();
 
-        let c_ser = tier_fraud_count(extract(&body_ser).as_ref().unwrap());
-        let c_raw = tier_fraud_count(extract(&body_raw).as_ref().unwrap());
+        let c_ser = tier_fraud_count(extract_filled(&body_ser).as_ref().unwrap());
+        let c_raw = tier_fraud_count(extract_filled(&body_raw).as_ref().unwrap());
 
         if c_ser != c_raw {
             raw_vs_ser += 1;

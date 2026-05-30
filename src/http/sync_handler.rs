@@ -114,7 +114,7 @@ fn try_handle_one(stream: &mut TcpStream, buf: &[u8]) -> HandleOutcome {
 
 #[inline]
 fn fraud_count_body(body: &[u8]) -> u8 {
-    match extract(body) {
+    match crate::ingest::extract_filled(body) {
         Some(p) => tier_fraud_count(&p),
         None => 5,
     }

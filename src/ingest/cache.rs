@@ -47,13 +47,21 @@ impl Default for TierCache {
     }
 }
 
-pub fn fill(p: &RawPayload<'_>) -> TierCache {
-    let mut c = TierCache {
+/// Campos baratos: MCC, loja conhecida, ratio (não precisa de árvore).
+pub fn fill_base(p: &RawPayload<'_>) -> TierCache {
+    let safe_avg = p.customer_avg_amount.max(1.0);
+    let norm = clamp01((p.amount / safe_avg) / AMOUNT_VS_AVG_RATIO);
+    let ratio_count = if norm > RATIO_FRAUD_THRESHOLD { 5 } else { 0 };
+    TierCache {
         mcc_u32: mcc4_u32(p.merchant_mcc),
         merchant_known: merchant_known(p),
+        ratio_count,
         ..TierCache::default()
-    };
+    }
+}
 
+/// ISO + flags de gray area — só depois que fast path óbvio falhar.
+pub fn fill_datetime(p: &RawPayload<'_>, c: &mut TierCache) {
     if let Some(parsed) = parse_iso(p.requested_at) {
         c.requested_valid = true;
         c.req_hour = parsed.0;
@@ -69,12 +77,14 @@ pub fn fill(p: &RawPayload<'_>) -> TierCache {
         }
     }
 
-    let safe_avg = p.customer_avg_amount.max(1.0);
-    let norm = clamp01((p.amount / safe_avg) / AMOUNT_VS_AVG_RATIO);
-    c.ratio_count = if norm > RATIO_FRAUD_THRESHOLD { 5 } else { 0 };
     c.gray_ratio_only =
         !c.requested_valid || (c.last_present && !c.last_epoch_ok);
+}
 
+/// Compat: base + datetime (ferramentas offline).
+pub fn fill(p: &RawPayload<'_>) -> TierCache {
+    let mut c = fill_base(p);
+    fill_datetime(p, &mut c);
     c
 }
 
@@ -107,19 +117,27 @@ fn contains_quoted(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() || haystack.len() < needle.len() + 2 {
         return false;
     }
-    if needle.len() + 2 <= 32 {
-        let mut pat = [0u8; 34];
+    if needle.len() + 2 <= 34 {
+        let mut pat = [0u8; 36];
         pat[0] = b'"';
         pat[1..1 + needle.len()].copy_from_slice(needle);
         pat[1 + needle.len()] = b'"';
         let pat = &pat[..needle.len() + 2];
-        return haystack.windows(pat.len()).any(|w| w == pat);
+        if let Some(found) = memchr::memmem::find(haystack, pat) {
+            return found + pat.len() <= haystack.len();
+        }
+        return false;
     }
     let mut i = 0;
-    while i + needle.len() + 1 < haystack.len() {
-        if haystack[i] == b'"'
-            && haystack[i + 1..].starts_with(needle)
-            && haystack.get(i + 1 + needle.len()) == Some(&b'"')
+    while i < haystack.len() {
+        if haystack[i] != b'"' {
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        if start + needle.len() + 1 <= haystack.len()
+            && haystack[start..start + needle.len()] == *needle
+            && haystack.get(start + needle.len()) == Some(&b'"')
         {
             return true;
         }

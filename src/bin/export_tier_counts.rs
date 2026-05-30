@@ -1,6 +1,6 @@
 //! Emite uma linha por entrada: tier_fraud_count no JSON bruto do arquivo.
 
-use fraud_detector::ingest::extract;
+use fraud_detector::ingest::extract_filled;
 use fraud_detector::search::tier_fraud_count;
 use std::env;
 use std::fs;
@@ -66,7 +66,7 @@ fn main() {
         pos = eend;
 
         let body = extract_request_raw(entry_slice).unwrap().as_bytes();
-        let count = tier_fraud_count(extract(body).as_ref().unwrap());
+        let count = tier_fraud_count(extract_filled(body).as_ref().unwrap());
         writeln!(out, "{count}").unwrap();
     }
 }

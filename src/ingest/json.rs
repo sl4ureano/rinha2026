@@ -23,6 +23,21 @@ pub struct RawPayload<'a> {
 }
 
 pub fn extract(body: &[u8]) -> Option<RawPayload<'_>> {
+    let mut p = super::linear::extract_linear(body).or_else(|| extract_scanner(body))?;
+    p.cache = super::cache::fill_base(&p);
+    Some(p)
+}
+
+/// `extract` + datas ISO (verify offline, handlers TCP legados).
+pub fn extract_filled(body: &[u8]) -> Option<RawPayload<'_>> {
+    let mut p = extract(body)?;
+    let mut cache = p.cache;
+    super::cache::fill_datetime(&p, &mut cache);
+    p.cache = cache;
+    Some(p)
+}
+
+fn extract_scanner(body: &[u8]) -> Option<RawPayload<'_>> {
     let mut p = RawPayload::default();
     let mut s = Scanner::new(body);
     s.expect(b'{')?;
@@ -53,7 +68,6 @@ pub fn extract(body: &[u8]) -> Option<RawPayload<'_>> {
             s.bump();
         }
     }
-    p.cache = super::cache::fill(&p);
     Some(p)
 }
 
@@ -187,54 +201,7 @@ fn parse_last_transaction<'a>(s: &mut Scanner<'a>, p: &mut RawPayload<'a>) -> Op
     Some(())
 }
 
-#[inline]
-fn parse_u32_bytes(s: &[u8]) -> Option<u32> {
-    if s.is_empty() {
-        return None;
-    }
-    let mut n = 0u32;
-    for &b in s {
-        if !b.is_ascii_digit() {
-            return None;
-        }
-        n = n * 10 + (b - b'0') as u32;
-    }
-    Some(n)
-}
-
-#[inline]
-fn parse_f32_bytes(s: &[u8]) -> Option<f32> {
-    if s.is_empty() {
-        return None;
-    }
-    let mut i = 0usize;
-    let neg = s[0] == b'-';
-    if neg {
-        i += 1;
-    }
-    let mut int_part = 0u64;
-    while i < s.len() && s[i].is_ascii_digit() {
-        let d = (s[i] - b'0') as u64;
-        int_part = int_part.checked_mul(10)?.checked_add(d)?;
-        i += 1;
-    }
-    let mut frac = 0u64;
-    let mut frac_div = 1u64;
-    if i < s.len() && s[i] == b'.' {
-        i += 1;
-        while i < s.len() && s[i].is_ascii_digit() {
-            let d = (s[i] - b'0') as u64;
-            frac = frac.checked_mul(10)?.checked_add(d)?;
-            frac_div = frac_div.checked_mul(10)?;
-            i += 1;
-        }
-    }
-    if i != s.len() {
-        return None;
-    }
-    let v = (int_part as f64 + frac as f64 / frac_div as f64) as f32;
-    Some(if neg { -v } else { v })
-}
+use super::numbers::{parse_f32_bytes, parse_u32_bytes};
 
 struct Scanner<'a> {
     buf: &'a [u8],
@@ -452,8 +419,18 @@ mod tests {
     const SAMPLE: &[u8] = br#"{"id":"tx-100","transaction":{"amount":41.12,"installments":2,"requested_at":"2026-03-11T18:45:53Z"},"customer":{"avg_amount":82.24,"tx_count_24h":3,"known_merchants":["MERC-003","MERC-016"]},"merchant":{"id":"MERC-016","mcc":"5411","avg_amount":60.25},"terminal":{"is_online":false,"card_present":true,"km_from_home":29.2331},"last_transaction":null}"#;
 
     #[test]
+    fn linear_matches_scanner() {
+        let a = extract_scanner(SAMPLE).unwrap();
+        let b = super::linear::extract_linear(SAMPLE).unwrap();
+        assert_eq!(a.amount.to_bits(), b.amount.to_bits());
+        assert_eq!(a.installments, b.installments);
+        assert_eq!(a.merchant_id, b.merchant_id);
+        assert_eq!(a.merchant_mcc, b.merchant_mcc);
+    }
+
+    #[test]
     fn extracts_known_fields() {
-        let p = extract(SAMPLE).unwrap();
+        let p = extract_filled(SAMPLE).unwrap();
         assert!((p.amount - 41.12).abs() < 0.001);
         assert_eq!(p.installments, 2);
         assert_eq!(p.merchant_id, b"MERC-016");

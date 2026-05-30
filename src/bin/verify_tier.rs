@@ -1,6 +1,6 @@
 //! Valida tier scorer vs expected_approved em test-data.json.
 
-use fraud_detector::ingest::extract;
+use fraud_detector::ingest::extract_filled;
 use fraud_detector::search::tier_fraud_count;
 use std::env;
 use std::fs;
@@ -35,7 +35,7 @@ fn main() {
 
     for entry in &file.entries {
         let body = serde_json::to_vec(&entry.request).expect("serialize");
-        let Some(p) = extract(&body) else {
+        let Some(p) = extract_filled(&body) else {
             parse_fail += 1;
             continue;
         };

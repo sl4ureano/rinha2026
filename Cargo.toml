@@ -17,6 +17,7 @@ monoio-http = ["dep:monoio", "dep:socket2", "knn-index"]
 
 [dependencies]
 libc = "0.2"
+memchr = "2.7"
 monoio = { version = "0.2", features = ["legacy", "macros"], optional = true }
 memmap2 = { version = "0.9", optional = true }
 anyhow = "1"
@@ -85,6 +86,10 @@ path = "src/bin/verify_c_parity.rs"
 [[bin]]
 name = "export-tier-counts"
 path = "src/bin/export_tier_counts.rs"
+
+[[bin]]
+name = "pgo-train"
+path = "src/bin/pgo_train.rs"
 
 [profile.release]
 opt-level = 3

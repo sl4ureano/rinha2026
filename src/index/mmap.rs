@@ -9,10 +9,6 @@ use std::path::Path;
 
 #[cfg(target_os = "linux")]
 const MADV_HUGEPAGE: libc::c_int = 14;
-#[cfg(target_os = "linux")]
-const MADV_DONTNEED: libc::c_int = 4;
-#[cfg(target_os = "linux")]
-const MADV_RANDOM: libc::c_int = 1;
 
 pub struct Index {
     _mmap: Mmap,
@@ -33,8 +29,7 @@ unsafe impl Send for Index {}
 unsafe impl Sync for Index {}
 
 impl Index {
-    /// Create a minimal empty index (no file, no mmap). Used in tier-only mode
-    /// where fraud scoring uses heuristics instead of k-NN search.
+    /// Minimal empty index (sem vetores). Hot path cai em tier se `block_count == 0`.
     pub fn empty() -> Self {
         use memmap2::MmapOptions;
         let mmap = MmapOptions::new().len(1).map_anon().unwrap().make_read_only().unwrap();
@@ -134,18 +129,6 @@ impl Index {
     fn advise(&self) {
         unsafe {
             libc::madvise(self.base as *mut _, self.len, MADV_HUGEPAGE);
-            // Hot path uses tier_score only — drop ~90 MB vectors+labels from CPU cache.
-            let cold_start = self.vectors_off;
-            let cold_len = self.mcc_table_off - cold_start;
-            if cold_len > 0 {
-                libc::madvise(self.base.add(cold_start) as *mut _, cold_len, MADV_DONTNEED);
-            }
-            let mcc_len = MCC_TABLE_SIZE * 2;
-            libc::madvise(
-                self.base.add(self.mcc_table_off) as *mut _,
-                mcc_len,
-                MADV_RANDOM,
-            );
         }
     }
     #[cfg(not(target_os = "linux"))]

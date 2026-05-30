@@ -1,6 +1,6 @@
 //! Estatísticas de caminho do tier_score (atalhos vs árvore vs ratio).
 
-use fraud_detector::ingest::extract;
+use fraud_detector::ingest::extract_filled;
 use fraud_detector::search::{ratio_only_count, tier_fraud_count, tier_path, tree_only_count, TierPath};
 use std::env;
 use std::fs;
@@ -35,7 +35,7 @@ fn main() {
 
     for entry in &file.entries {
         let body = serde_json::to_vec(&entry.request).unwrap();
-        let Some(p) = extract(&body) else {
+        let Some(p) = extract_filled(&body) else {
             continue;
         };
         match tier_path(&p) {
