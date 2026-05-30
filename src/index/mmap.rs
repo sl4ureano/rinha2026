@@ -10,9 +10,9 @@ use std::path::Path;
 #[cfg(target_os = "linux")]
 const MADV_HUGEPAGE: libc::c_int = 14;
 #[cfg(target_os = "linux")]
-const MADV_RANDOM: libc::c_int = 1;
+const MADV_DONTNEED: libc::c_int = 4;
 #[cfg(target_os = "linux")]
-const MADV_WILLNEED: libc::c_int = 3;
+const MADV_RANDOM: libc::c_int = 1;
 
 pub struct Index {
     _mmap: Mmap,
@@ -134,14 +134,18 @@ impl Index {
     fn advise(&self) {
         unsafe {
             libc::madvise(self.base as *mut _, self.len, MADV_HUGEPAGE);
-            // The hot region we re-touch every request is just the vectors +
-            // labels; mark it WILLNEED so the kernel keeps it resident. The
-            // partitions/nodes are tiny and don't need explicit advice.
-            let hot_start = self.vectors_off;
-            let hot_len = self.len - hot_start;
-            libc::madvise(self.base.add(hot_start) as *mut _, hot_len, MADV_HUGEPAGE);
-            libc::madvise(self.base.add(hot_start) as *mut _, hot_len, MADV_RANDOM);
-            libc::madvise(self.base.add(hot_start) as *mut _, hot_len, MADV_WILLNEED);
+            // Hot path uses tier_score only — drop ~90 MB vectors+labels from CPU cache.
+            let cold_start = self.vectors_off;
+            let cold_len = self.mcc_table_off - cold_start;
+            if cold_len > 0 {
+                libc::madvise(self.base.add(cold_start) as *mut _, cold_len, MADV_DONTNEED);
+            }
+            let mcc_len = MCC_TABLE_SIZE * 2;
+            libc::madvise(
+                self.base.add(self.mcc_table_off) as *mut _,
+                mcc_len,
+                MADV_RANDOM,
+            );
         }
     }
     #[cfg(not(target_os = "linux"))]

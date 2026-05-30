@@ -3,7 +3,7 @@
 use std::os::fd::RawFd;
 
 use crate::config::LbConfig;
-use crate::platform::scm::{connect_unix_retry, connect_unix_once, send_fd, set_tcp_nodelay};
+use crate::platform::scm::{connect_unix_once, connect_unix_retry, send_fd};
 
 const BACKLOG: libc::c_int = 65535;
 
@@ -80,40 +80,66 @@ pub fn run(cfg: LbConfig) {
     let mut rr_next: u32 = 0;
 
     loop {
-        let client = unsafe {
-            libc::accept4(
-                listen_fd,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
-            )
-        };
-        if client < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            continue;
-        }
-        // Zero socket options here — API sets them after receiving the fd.
-        // This makes the LB path: accept4 → sendmsg → close (3 syscalls).
-
-        let first = (rr_next % upstream_count as u32) as usize;
-        rr_next = rr_next.wrapping_add(1);
-
-        if !handoff(&mut upstreams[first], client) {
-            for offset in 1..upstream_count {
-                if handoff(&mut upstreams[(first + offset) % upstream_count], client) {
+        let mut accepted = 0usize;
+        loop {
+            let client = unsafe {
+                libc::accept4(
+                    listen_fd,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+                )
+            };
+            if client < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EAGAIN)
+                    || err.raw_os_error() == Some(libc::EWOULDBLOCK)
+                {
                     break;
                 }
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                break;
+            }
+
+            let first = (rr_next % upstream_count as u32) as usize;
+            rr_next = rr_next.wrapping_add(1);
+
+            if !handoff(&mut upstreams[first], client) {
+                for offset in 1..upstream_count {
+                    if handoff(&mut upstreams[(first + offset) % upstream_count], client) {
+                        break;
+                    }
+                }
+            }
+            unsafe { libc::close(client) };
+
+            accepted += 1;
+            if accepted >= 64 {
+                break;
             }
         }
-        unsafe { libc::close(client) };
+
+        if accepted == 0 {
+            let mut pfd = libc::pollfd {
+                fd: listen_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            unsafe { libc::poll(&mut pfd, 1, 1) };
+        }
     }
 }
 
 fn tcp_listen(port: u16) -> std::io::Result<RawFd> {
-    let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+    let sock = unsafe {
+        libc::socket(
+            libc::AF_INET,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+        )
+    };
     if sock < 0 {
         return Err(std::io::Error::last_os_error());
     }
