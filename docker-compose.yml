@@ -43,7 +43,6 @@ services:
       - FD_PASS=1
       - CTRL_SOCK=/tmp/sockets/api1.sock
       - PORT=8080
-      - EPOLL_BUSY_POLL_US=50
     networks:
       - rinha
 
@@ -55,7 +54,6 @@ services:
       - FD_PASS=1
       - CTRL_SOCK=/tmp/sockets/api2.sock
       - PORT=8080
-      - EPOLL_BUSY_POLL_US=50
 
   lb:
     image: ghcr.io/sl4ureano/rinha2026:oraculo
