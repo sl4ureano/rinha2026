@@ -8,7 +8,7 @@ ENV RUSTFLAGS="-C target-cpu=haswell -C opt-level=3"
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 
-RUN cargo build --release --bin server --bin healthcheck --bin lb --bin build-index --no-default-features --features submission
+RUN cargo build --release --bin server --bin healthcheck --bin lb --bin build-index --bin verify-tier --bin verify-fast-tier --bin analyze-tree-split --bin analyze-fast-expand --no-default-features --features submission
 
 
 ## Stage 2: build k-NN index from references

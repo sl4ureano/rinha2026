@@ -10,15 +10,17 @@ use std::sync::Arc;
 use crate::http::response;
 use crate::index::Index;
 use crate::ingest::extract;
-use crate::search::{tier_fraud_count, try_fast_fraud_count};
+use crate::search::{complete_cache, run_warmup, tier_gray_count, try_fast_fraud_count};
 
 /// Limite de fds rastreados (8k cobre a prova; evita ~512 KiB de tabela estática).
 const MAX_FDS: usize = 8192;
 const MAX_EVENTS: i32 = 512;
 const BUF_CAP: usize = 8192;
+const CONN_POOL_CAP: usize = 256;
 const CTRL_LISTEN_TOKEN: u64 = u64::MAX;
 const TCP_LISTEN_TOKEN: u64 = u64::MAX - 1;
-const EPOLL_TIMEOUT_MS: i32 = 1; // 1ms poll (busy-wait hurts without kernel busy-poll)
+const HEALTH_LISTEN_TOKEN: u64 = u64::MAX - 2;
+const EPOLL_TIMEOUT_MS: i32 = 1;
 
 // Edge-triggered flags
 const CLIENT_EVENTS: u32 = (libc::EPOLLIN | libc::EPOLLRDHUP | libc::EPOLLET) as u32;
@@ -55,8 +57,67 @@ impl Conn {
 
 static mut CONNS: [*mut Conn; MAX_FDS] = [std::ptr::null_mut(); MAX_FDS];
 static mut IS_CTRL: [bool; MAX_FDS] = [false; MAX_FDS];
+static mut CONN_POOL: [*mut Conn; CONN_POOL_CAP] = [std::ptr::null_mut(); CONN_POOL_CAP];
+static mut CONN_POOL_LEN: usize = 0;
 static mut EPFD: RawFd = -1;
 static mut INDEX_PTR: *const Index = std::ptr::null();
+
+fn env_us(key: &str, default: u32) -> u32 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+unsafe fn pool_pop() -> Option<*mut Conn> {
+    if CONN_POOL_LEN == 0 {
+        return None;
+    }
+    CONN_POOL_LEN -= 1;
+    Some(CONN_POOL[CONN_POOL_LEN])
+}
+
+unsafe fn pool_push(c: *mut Conn) {
+    if CONN_POOL_LEN < CONN_POOL_CAP {
+        CONN_POOL[CONN_POOL_LEN] = c;
+        CONN_POOL_LEN += 1;
+    } else {
+        drop(Box::from_raw(c));
+    }
+}
+
+fn configure_epoll_params() {
+    let busy_poll = env_us("EPOLL_BUSY_POLL_US", 200);
+    unsafe {
+        let params = EpollParams {
+            busy_poll_usecs: busy_poll,
+            busy_poll_budget: 16,
+            prefer_busy_poll: 1,
+            _pad: 0,
+        };
+        let ret = libc::ioctl(EPFD, EPIOCSPARAMS, &params as *const EpollParams);
+        if ret < 0 {
+            eprintln!("EPIOCSPARAMS: {} (non-fatal)", std::io::Error::last_os_error());
+        } else {
+            eprintln!("epoll busy_poll={busy_poll}us budget=16 timeout={EPOLL_TIMEOUT_MS}ms");
+        }
+    }
+}
+
+/// Re-arm client fd for epoll (MOD if already registered, else ADD).
+#[inline]
+unsafe fn epoll_arm(fd: RawFd, events: u32) {
+    let mut ev = libc::epoll_event {
+        events,
+        u64: fd as u64,
+    };
+    if libc::epoll_ctl(EPFD, libc::EPOLL_CTL_MOD, fd, &mut ev) < 0 {
+        let err = *libc::__errno_location();
+        if err == libc::ENOENT {
+            libc::epoll_ctl(EPFD, libc::EPOLL_CTL_ADD, fd, &mut ev);
+        }
+    }
+}
 
 #[inline]
 unsafe fn get_conn(fd: RawFd) -> *mut Conn {
@@ -65,13 +126,15 @@ unsafe fn get_conn(fd: RawFd) -> *mut Conn {
         return std::ptr::null_mut();
     }
     if CONNS[idx].is_null() {
-        let c = Box::into_raw(Box::new(Conn {
-            buf: [0u8; BUF_CAP],
-            buf_len: 0,
-            send_ptr: std::ptr::null(),
-            send_len: 0,
-            send_off: 0,
-        }));
+        let c = pool_pop().unwrap_or_else(|| {
+            Box::into_raw(Box::new(Conn {
+                buf: [0u8; BUF_CAP],
+                buf_len: 0,
+                send_ptr: std::ptr::null(),
+                send_len: 0,
+                send_off: 0,
+            }))
+        });
         CONNS[idx] = c;
     }
     let c = CONNS[idx];
@@ -81,6 +144,11 @@ unsafe fn get_conn(fd: RawFd) -> *mut Conn {
 
 #[inline]
 unsafe fn drop_conn(fd: RawFd) {
+    let idx = fd as usize;
+    if idx < MAX_FDS && !CONNS[idx].is_null() {
+        pool_push(CONNS[idx]);
+        CONNS[idx] = std::ptr::null_mut();
+    }
     libc::epoll_ctl(EPFD, libc::EPOLL_CTL_DEL, fd, std::ptr::null_mut());
     libc::close(fd);
 }
@@ -102,16 +170,7 @@ pub fn run_direct(index: Arc<Index>, port: u16) -> anyhow::Result<()> {
             return Err(anyhow::anyhow!("epoll_create1: {}", std::io::Error::last_os_error()));
         }
 
-        let params = EpollParams {
-            busy_poll_usecs: 200,
-            busy_poll_budget: 16,
-            prefer_busy_poll: 1,
-            _pad: 0,
-        };
-        let ret = libc::ioctl(EPFD, EPIOCSPARAMS, &params as *const EpollParams);
-        if ret < 0 {
-            eprintln!("EPIOCSPARAMS: {} (non-fatal)", std::io::Error::last_os_error());
-        }
+        configure_epoll_params();
 
         let mut ev = libc::epoll_event {
             events: (libc::EPOLLIN | libc::EPOLLET) as u32,
@@ -119,6 +178,7 @@ pub fn run_direct(index: Arc<Index>, port: u16) -> anyhow::Result<()> {
         };
         libc::epoll_ctl(EPFD, libc::EPOLL_CTL_ADD, tcp_fd, &mut ev);
 
+        run_warmup();
         event_loop_direct(tcp_fd);
     }
 }
@@ -241,7 +301,7 @@ fn create_tcp_listener(port: u16) -> anyhow::Result<RawFd> {
     Ok(fd)
 }
 
-pub fn run(sock_path: &Path, index: Arc<Index>) -> anyhow::Result<()> {
+pub fn run(sock_path: &Path, index: Arc<Index>, health_port: u16) -> anyhow::Result<()> {
     unsafe {
         INDEX_PTR = Arc::into_raw(index);
     }
@@ -256,7 +316,11 @@ pub fn run(sock_path: &Path, index: Arc<Index>) -> anyhow::Result<()> {
     }
 
     let ctrl_listen_fd = create_unix_listener(sock_path)?;
-    eprintln!("listening on uds fd-passing {}", sock_path.display());
+    let health_fd = create_tcp_listener(health_port)?;
+    eprintln!(
+        "listening on uds fd-passing {} + health :{health_port}",
+        sock_path.display()
+    );
 
     unsafe {
         EPFD = libc::epoll_create1(libc::EPOLL_CLOEXEC);
@@ -264,32 +328,23 @@ pub fn run(sock_path: &Path, index: Arc<Index>) -> anyhow::Result<()> {
             return Err(anyhow::anyhow!("epoll_create1: {}", std::io::Error::last_os_error()));
         }
 
-        // Configure epoll busy-poll
-        let params = EpollParams {
-            busy_poll_usecs: 200,
-            busy_poll_budget: 16,
-            prefer_busy_poll: 1,
-            _pad: 0,
-        };
-        let ret = libc::ioctl(EPFD, EPIOCSPARAMS, &params as *const EpollParams);
-        if ret < 0 {
-            eprintln!("EPIOCSPARAMS: {} (non-fatal)", std::io::Error::last_os_error());
-        } else {
-            eprintln!("epoll busy_poll=50us budget=8 prefer=1");
-        }
+        configure_epoll_params();
 
-        // Register ctrl listener (edge-triggered)
         let mut ev = libc::epoll_event {
             events: (libc::EPOLLIN | libc::EPOLLET) as u32,
             u64: CTRL_LISTEN_TOKEN,
         };
         libc::epoll_ctl(EPFD, libc::EPOLL_CTL_ADD, ctrl_listen_fd, &mut ev);
 
-        event_loop(ctrl_listen_fd);
+        ev.u64 = HEALTH_LISTEN_TOKEN;
+        libc::epoll_ctl(EPFD, libc::EPOLL_CTL_ADD, health_fd, &mut ev);
+
+        run_warmup();
+        event_loop(ctrl_listen_fd, health_fd);
     }
 }
 
-unsafe fn event_loop(ctrl_listen_fd: RawFd) -> ! {
+unsafe fn event_loop(ctrl_listen_fd: RawFd, health_fd: RawFd) -> ! {
     let mut events = [libc::epoll_event { events: 0, u64: 0 }; MAX_EVENTS as usize];
 
     loop {
@@ -308,6 +363,10 @@ unsafe fn event_loop(ctrl_listen_fd: RawFd) -> ! {
 
             if token == CTRL_LISTEN_TOKEN {
                 accept_ctrl_conn(ctrl_listen_fd);
+                continue;
+            }
+            if token == HEALTH_LISTEN_TOKEN {
+                accept_health_clients(health_fd);
                 continue;
             }
 
@@ -338,6 +397,31 @@ unsafe fn event_loop(ctrl_listen_fd: RawFd) -> ! {
                 drop_conn(fd);
             }
         }
+    }
+}
+
+unsafe fn accept_health_clients(health_fd: RawFd) {
+    loop {
+        let client_fd = libc::accept4(
+            health_fd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+        );
+        if client_fd < 0 {
+            return;
+        }
+        let mut buf = [0u8; 256];
+        let n = libc::recv(client_fd, buf.as_mut_ptr() as *mut _, buf.len(), 0);
+        if n > 0 && buf[..n as usize].windows(6).any(|w| w == b"/ready") {
+            let _ = libc::send(
+                client_fd,
+                response::RESP_READY.as_ptr() as *const _,
+                response::RESP_READY.len(),
+                libc::MSG_NOSIGNAL,
+            );
+        }
+        libc::close(client_fd);
     }
 }
 
@@ -455,12 +539,7 @@ unsafe fn try_process_request(fd: RawFd, c: *mut Conn) -> bool {
                     continue; // Try to process next pipelined request
                 }
                 (*c).buf_len = 0;
-                // ET: register for next request (keep-alive)
-                let mut ev = libc::epoll_event {
-                    events: CLIENT_EVENTS,
-                    u64: fd as u64,
-                };
-                libc::epoll_ctl(EPFD, libc::EPOLL_CTL_ADD, fd, &mut ev);
+                epoll_arm(fd, CLIENT_EVENTS);
                 return true;
             } else if sent < 0 {
                 let err = *libc::__errno_location();
@@ -473,11 +552,7 @@ unsafe fn try_process_request(fd: RawFd, c: *mut Conn) -> bool {
                         std::ptr::copy((*c).buf.as_ptr().add(consumed), (*c).buf.as_mut_ptr(), leftover);
                     }
                     (*c).buf_len = leftover;
-                    let mut ev = libc::epoll_event {
-                        events: CLIENT_WRITE_EVENTS,
-                        u64: fd as u64,
-                    };
-                    libc::epoll_ctl(EPFD, libc::EPOLL_CTL_ADD, fd, &mut ev);
+                    epoll_arm(fd, CLIENT_WRITE_EVENTS);
                     return true;
                 }
                 libc::close(fd);
@@ -492,11 +567,7 @@ unsafe fn try_process_request(fd: RawFd, c: *mut Conn) -> bool {
                     std::ptr::copy((*c).buf.as_ptr().add(consumed), (*c).buf.as_mut_ptr(), leftover);
                 }
                 (*c).buf_len = leftover;
-                let mut ev = libc::epoll_event {
-                    events: CLIENT_WRITE_EVENTS,
-                    u64: fd as u64,
-                };
-                libc::epoll_ctl(EPFD, libc::EPOLL_CTL_ADD, fd, &mut ev);
+                epoll_arm(fd, CLIENT_WRITE_EVENTS);
                 return true;
             }
         }
@@ -504,11 +575,7 @@ unsafe fn try_process_request(fd: RawFd, c: *mut Conn) -> bool {
         // GET /ready
         if buf.len() >= 10 && &buf[..3] == b"GET" {
             send_response_inline(fd, response::RESP_READY);
-            let mut ev = libc::epoll_event {
-                events: (libc::EPOLLIN | libc::EPOLLRDHUP) as u32,
-                u64: fd as u64,
-            };
-            libc::epoll_ctl(EPFD, libc::EPOLL_CTL_ADD, fd, &mut ev);
+            epoll_arm(fd, (libc::EPOLLIN | libc::EPOLLRDHUP) as u32);
             return true;
         }
 
@@ -592,11 +659,7 @@ unsafe fn handle_client_read(fd: RawFd) {
                         std::ptr::copy((*c).buf.as_ptr().add(consumed), (*c).buf.as_mut_ptr(), leftover);
                     }
                     (*c).buf_len = leftover;
-                    let mut ev = libc::epoll_event {
-                        events: CLIENT_WRITE_EVENTS,
-                        u64: fd as u64,
-                    };
-                    libc::epoll_ctl(EPFD, libc::EPOLL_CTL_MOD, fd, &mut ev);
+                    epoll_arm(fd, CLIENT_WRITE_EVENTS);
                     return;
                 }
                 drop_conn(fd);
@@ -611,11 +674,7 @@ unsafe fn handle_client_read(fd: RawFd) {
                     std::ptr::copy((*c).buf.as_ptr().add(consumed), (*c).buf.as_mut_ptr(), leftover);
                 }
                 (*c).buf_len = leftover;
-                let mut ev = libc::epoll_event {
-                    events: CLIENT_WRITE_EVENTS,
-                    u64: fd as u64,
-                };
-                libc::epoll_ctl(EPFD, libc::EPOLL_CTL_MOD, fd, &mut ev);
+                epoll_arm(fd, CLIENT_WRITE_EVENTS);
                 return;
             }
         } else if buf.len() >= 3 && &buf[..3] == b"GET" {
@@ -644,11 +703,7 @@ unsafe fn handle_client_write(fd: RawFd) {
     }
     let c = CONNS[idx];
     if (*c).send_ptr.is_null() {
-        let mut ev = libc::epoll_event {
-            events: CLIENT_EVENTS,
-            u64: fd as u64,
-        };
-        libc::epoll_ctl(EPFD, libc::EPOLL_CTL_MOD, fd, &mut ev);
+        epoll_arm(fd, CLIENT_EVENTS);
         return;
     }
 
@@ -675,11 +730,7 @@ unsafe fn handle_client_write(fd: RawFd) {
     (*c).send_ptr = std::ptr::null();
     (*c).send_off = 0;
     (*c).send_len = 0;
-    let mut ev = libc::epoll_event {
-        events: CLIENT_EVENTS,
-        u64: fd as u64,
-    };
-    libc::epoll_ctl(EPFD, libc::EPOLL_CTL_MOD, fd, &mut ev);
+    epoll_arm(fd, CLIENT_EVENTS);
 }
 
 #[inline]
@@ -696,15 +747,12 @@ unsafe fn send_and_close(fd: RawFd, resp: &[u8]) {
 #[inline]
 fn fraud_response(body: &[u8]) -> &'static [u8] {
     match extract(body) {
-        Some(p) => {
-            let idx = unsafe { &*INDEX_PTR };
-            // 1. Fast path: obvious legit / obvious fraud (~79% of entries)
-            if let Some(count) = try_fast_fraud_count(idx, &p) {
+        Some(mut p) => {
+            if let Some(count) = try_fast_fraud_count(&p) {
                 return response::for_count(count);
             }
-            // 2. Decision tree + ratio fallback (fast, handles the ~21% gray area)
-            //    KNN index stays loaded for future hybrid mode if tree accuracy degrades.
-            response::for_count(tier_fraud_count(&p))
+            complete_cache(&mut p);
+            response::for_count(tier_gray_count(&p))
         }
         None => response::RESP_DENIED_S10,
     }

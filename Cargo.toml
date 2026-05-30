@@ -55,6 +55,22 @@ name = "verify-tier"
 path = "src/bin/verify_tier.rs"
 
 [[bin]]
+name = "verify-fast-tier"
+path = "src/bin/verify_fast_tier.rs"
+
+[[bin]]
+name = "analyze-fast-expand"
+path = "src/bin/analyze_fast_expand.rs"
+
+[[bin]]
+name = "analyze-tree-ratio"
+path = "src/bin/analyze_tree_ratio.rs"
+
+[[bin]]
+name = "analyze-tree-split"
+path = "src/bin/analyze_tree_split.rs"
+
+[[bin]]
 name = "tier-paths"
 path = "src/bin/tier_paths.rs"
 

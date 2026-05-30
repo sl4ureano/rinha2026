@@ -11,9 +11,8 @@ fn main() {
     {
         if let Some(ctrl_sock) = &cfg.ctrl_sock {
             let port = cfg.health_port;
-            std::thread::spawn(move || fraud_detector::http::health::health_tcp_loop(port));
             let index = load_index(&cfg);
-            fraud_detector::platform::fd_gateway::run(ctrl_sock.as_path(), index)
+            fraud_detector::platform::fd_gateway::run(ctrl_sock.as_path(), index, port)
                 .unwrap_or_else(|e| panic!("fd_gateway: {e}"));
             return;
         }

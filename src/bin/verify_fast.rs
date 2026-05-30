@@ -62,7 +62,7 @@ fn main() {
         let exact = fraud_count(&index, &v);
         let exact_ok = approved_from_count(exact);
 
-        if let Some(fast) = try_fast_fraud_count(&index, &p) {
+        if let Some(fast) = try_fast_fraud_count(&p) {
             fast_hits += 1;
             let fast_ok = approved_from_count(fast);
             if fast_ok != exact_ok {
