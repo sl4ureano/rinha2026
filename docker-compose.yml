@@ -18,7 +18,7 @@ x-api: &api-common
     - TIER_ONLY=1
     - EPOLL_BUSY_POLL=1
     - EPOLL_BUSY_POLL_PROFILE=D
-    - WARMUP_QUERIES=65536
+    - WARMUP_QUERIES=8192
   healthcheck:
     test: ["CMD", "/app/healthcheck"]
     interval: 1s
