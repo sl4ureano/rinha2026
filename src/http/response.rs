@@ -1,13 +1,18 @@
-pub const RESP_READY: &[u8] =
-    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
+pub const RESP_READY: &[u8] = b"HTTP/1.1 200\r\nContent-Length: 2\r\n\r\nOK";
 
 // Minimal headers: HTTP/1.1 defaults to keep-alive; k6 parses body via JSON.parse, no Content-Type needed.
-pub const RESP_APPROVED_S0: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 33\r\n\r\n{\"approved\":true,\"fraud_score\":0}";
-pub const RESP_APPROVED_S2: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}";
-pub const RESP_APPROVED_S4: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.4}";
-pub const RESP_DENIED_S6: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}";
-pub const RESP_DENIED_S8: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}";
-pub const RESP_DENIED_S10: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 34\r\n\r\n{\"approved\":false,\"fraud_score\":1}";
+pub const RESP_APPROVED_S0: &[u8] =
+    b"HTTP/1.1 200\r\nContent-Length: 33\r\n\r\n{\"approved\":true,\"fraud_score\":0}";
+pub const RESP_APPROVED_S2: &[u8] =
+    b"HTTP/1.1 200\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}";
+pub const RESP_APPROVED_S4: &[u8] =
+    b"HTTP/1.1 200\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.4}";
+pub const RESP_DENIED_S6: &[u8] =
+    b"HTTP/1.1 200\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}";
+pub const RESP_DENIED_S8: &[u8] =
+    b"HTTP/1.1 200\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}";
+pub const RESP_DENIED_S10: &[u8] =
+    b"HTTP/1.1 200\r\nContent-Length: 34\r\n\r\n{\"approved\":false,\"fraud_score\":1}";
 
 #[inline]
 pub fn for_count(count: u8) -> &'static [u8] {

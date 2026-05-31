@@ -1,6 +1,8 @@
 //! Allocation-free extractor for the 14 fields we care about. Tolerant of
 //! whitespace and key reorderings within objects, but assumes well-formed JSON.
 
+use crate::perf;
+
 #[derive(Debug, Clone, Default)]
 pub struct RawPayload<'a> {
     pub amount: f32,
@@ -23,6 +25,19 @@ pub struct RawPayload<'a> {
 }
 
 pub fn extract(body: &[u8]) -> Option<RawPayload<'_>> {
+    let parse_start = perf::stage_start();
+    let mut p = extract_inner(body);
+    perf::record_stage(perf::STAGE_PARSE_JSON, parse_start);
+
+    let cache_start = perf::stage_start();
+    if let Some(payload) = &mut p {
+        payload.cache = super::cache::fill(payload);
+    }
+    perf::record_stage(perf::STAGE_CACHE_INSERT, cache_start);
+    p
+}
+
+fn extract_inner(body: &[u8]) -> Option<RawPayload<'_>> {
     let mut p = RawPayload::default();
     let mut s = Scanner::new(body);
     s.expect(b'{')?;
@@ -53,7 +68,6 @@ pub fn extract(body: &[u8]) -> Option<RawPayload<'_>> {
             s.bump();
         }
     }
-    p.cache = super::cache::fill(&p);
     Some(p)
 }
 
