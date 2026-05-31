@@ -24,6 +24,8 @@ pub const STAGE_SEND_SYSCALL: usize = 13;
 pub const STAGE_WRITE_COMPLETE: usize = 14;
 pub const STAGE_SERVER_PROCESSING: usize = 15;
 pub const STAGE_REQUEST_TOTAL: usize = 16;
+pub const STAGE_EPOLL_WAIT: usize = 17;
+pub const STAGE_EPOLL_DISPATCH: usize = 18;
 
 // Backward-compatible names used by existing call sites.
 pub const STAGE_CACHE_LOOKUP: usize = STAGE_FAST_PATH_LOOKUP;
@@ -31,7 +33,7 @@ pub const STAGE_CACHE_INSERT: usize = STAGE_PAYLOAD_CACHE_FILL;
 pub const STAGE_SERIALIZE: usize = STAGE_RESPONSE_SELECT;
 pub const STAGE_WRITE_RESPONSE: usize = STAGE_SEND_SYSCALL;
 
-const STAGE_COUNT: usize = 17;
+const STAGE_COUNT: usize = 19;
 const HIST_BUCKET_COUNT: usize = 42;
 const HIST_BUCKETS_US: [u64; HIST_BUCKET_COUNT] = [
     1,
@@ -95,6 +97,8 @@ const STAGE_NAMES: [&str; STAGE_COUNT] = [
     "write_complete",
     "server_processing",
     "request_total",
+    "epoll_wait",
+    "epoll_dispatch",
 ];
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -129,6 +133,18 @@ static PARTIAL_WRITES: AtomicU64 = AtomicU64::new(0);
 static WRITE_EAGAIN: AtomicU64 = AtomicU64::new(0);
 static RECV_CALLS: AtomicU64 = AtomicU64::new(0);
 static SEND_CALLS: AtomicU64 = AtomicU64::new(0);
+static EPOLL_WAIT_CALLS: AtomicU64 = AtomicU64::new(0);
+static EPOLL_WAIT_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
+static EPOLL_WAIT_ERRORS: AtomicU64 = AtomicU64::new(0);
+static EPOLL_WAIT_EVENTS: AtomicU64 = AtomicU64::new(0);
+static EPOLL_WAIT_MAX_EVENTS: AtomicU64 = AtomicU64::new(0);
+static EPOLL_BUSY_POLL_SUPPORTED: AtomicBool = AtomicBool::new(false);
+static EPOLL_BUSY_POLL_ENABLED: AtomicBool = AtomicBool::new(false);
+static EPOLL_BUSY_POLL_USECS: AtomicU64 = AtomicU64::new(0);
+static EPOLL_BUSY_POLL_BUDGET: AtomicU64 = AtomicU64::new(0);
+static EPOLL_BUSY_POLL_PREFER: AtomicU64 = AtomicU64::new(0);
+static EPOLL_BUSY_POLL_SET_ERRNO: AtomicU64 = AtomicU64::new(0);
+static EPOLL_BUSY_POLL_GET_ERRNO: AtomicU64 = AtomicU64::new(0);
 
 static ALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
 static DEALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -191,6 +207,10 @@ struct SnapshotState {
     prev_alloc_bytes: u64,
     prev_realloc_calls: u64,
     prev_realloc_bytes: u64,
+    prev_epoll_wait_calls: u64,
+    prev_epoll_wait_timeouts: u64,
+    prev_epoll_wait_errors: u64,
+    prev_epoll_wait_events: u64,
 }
 
 impl Default for SnapshotState {
@@ -209,6 +229,10 @@ impl Default for SnapshotState {
             prev_alloc_bytes: 0,
             prev_realloc_calls: 0,
             prev_realloc_bytes: 0,
+            prev_epoll_wait_calls: 0,
+            prev_epoll_wait_timeouts: 0,
+            prev_epoll_wait_errors: 0,
+            prev_epoll_wait_events: 0,
         }
     }
 }
@@ -274,6 +298,11 @@ pub fn reset() {
     WRITE_EAGAIN.store(0, Ordering::Relaxed);
     RECV_CALLS.store(0, Ordering::Relaxed);
     SEND_CALLS.store(0, Ordering::Relaxed);
+    EPOLL_WAIT_CALLS.store(0, Ordering::Relaxed);
+    EPOLL_WAIT_TIMEOUTS.store(0, Ordering::Relaxed);
+    EPOLL_WAIT_ERRORS.store(0, Ordering::Relaxed);
+    EPOLL_WAIT_EVENTS.store(0, Ordering::Relaxed);
+    EPOLL_WAIT_MAX_EVENTS.store(0, Ordering::Relaxed);
     ALLOC_CALLS.store(0, Ordering::Relaxed);
     DEALLOC_CALLS.store(0, Ordering::Relaxed);
     REALLOC_CALLS.store(0, Ordering::Relaxed);
@@ -287,6 +316,54 @@ pub fn reset() {
             STAGE_HIST[stage][bucket].store(0, Ordering::Relaxed);
         }
     }
+}
+
+pub fn set_epoll_busy_poll_result(
+    supported: bool,
+    busy_poll_enabled: bool,
+    usecs: u32,
+    budget: u16,
+    prefer: u8,
+    set_errno: i32,
+    get_errno: i32,
+) {
+    if !enabled() {
+        return;
+    }
+    EPOLL_BUSY_POLL_SUPPORTED.store(supported, Ordering::Relaxed);
+    EPOLL_BUSY_POLL_ENABLED.store(busy_poll_enabled, Ordering::Relaxed);
+    EPOLL_BUSY_POLL_USECS.store(usecs as u64, Ordering::Relaxed);
+    EPOLL_BUSY_POLL_BUDGET.store(budget as u64, Ordering::Relaxed);
+    EPOLL_BUSY_POLL_PREFER.store(prefer as u64, Ordering::Relaxed);
+    EPOLL_BUSY_POLL_SET_ERRNO.store(set_errno.max(0) as u64, Ordering::Relaxed);
+    EPOLL_BUSY_POLL_GET_ERRNO.store(get_errno.max(0) as u64, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn record_epoll_wait(start: Option<Instant>, nfds: i32) {
+    if !enabled() {
+        return;
+    }
+    EPOLL_WAIT_CALLS.fetch_add(1, Ordering::Relaxed);
+    match nfds {
+        n if n > 0 => {
+            let events = n as u64;
+            EPOLL_WAIT_EVENTS.fetch_add(events, Ordering::Relaxed);
+            update_max(&EPOLL_WAIT_MAX_EVENTS, events);
+        }
+        0 => {
+            EPOLL_WAIT_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {
+            EPOLL_WAIT_ERRORS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    record_stage(STAGE_EPOLL_WAIT, start);
+}
+
+#[inline]
+pub fn record_epoll_dispatch(start: Option<Instant>) {
+    record_stage(STAGE_EPOLL_DISPATCH, start);
 }
 
 #[inline]
@@ -660,6 +737,23 @@ fn build_snapshot(state: &mut SnapshotState) -> Value {
     state.prev_realloc_calls = current_realloc_calls;
     state.prev_realloc_bytes = current_realloc_bytes;
 
+    let epoll_wait_calls = EPOLL_WAIT_CALLS.load(Ordering::Relaxed);
+    let epoll_wait_timeouts = EPOLL_WAIT_TIMEOUTS.load(Ordering::Relaxed);
+    let epoll_wait_errors = EPOLL_WAIT_ERRORS.load(Ordering::Relaxed);
+    let epoll_wait_events = EPOLL_WAIT_EVENTS.load(Ordering::Relaxed);
+    let window_epoll_wait_calls =
+        epoll_wait_calls.saturating_sub(state.prev_epoll_wait_calls);
+    let window_epoll_wait_timeouts =
+        epoll_wait_timeouts.saturating_sub(state.prev_epoll_wait_timeouts);
+    let window_epoll_wait_errors =
+        epoll_wait_errors.saturating_sub(state.prev_epoll_wait_errors);
+    let window_epoll_wait_events =
+        epoll_wait_events.saturating_sub(state.prev_epoll_wait_events);
+    state.prev_epoll_wait_calls = epoll_wait_calls;
+    state.prev_epoll_wait_timeouts = epoll_wait_timeouts;
+    state.prev_epoll_wait_errors = epoll_wait_errors;
+    state.prev_epoll_wait_events = epoll_wait_events;
+
     json!({
         "timestamp": unix_timestamp_millis(),
         "instance": instance_id(),
@@ -696,6 +790,27 @@ fn build_snapshot(state: &mut SnapshotState) -> Value {
             "send_calls": SEND_CALLS.load(Ordering::Relaxed),
             "partial_writes": PARTIAL_WRITES.load(Ordering::Relaxed),
             "write_eagain": WRITE_EAGAIN.load(Ordering::Relaxed),
+        },
+        "epoll": {
+            "wait_calls": epoll_wait_calls,
+            "wait_timeouts": epoll_wait_timeouts,
+            "wait_errors": epoll_wait_errors,
+            "wait_events": epoll_wait_events,
+            "max_events_per_wakeup": EPOLL_WAIT_MAX_EVENTS.load(Ordering::Relaxed),
+            "events_per_wakeup": avg(epoll_wait_events, epoll_wait_calls.saturating_sub(epoll_wait_timeouts)),
+            "wakeups_per_sec": window_epoll_wait_calls.saturating_sub(window_epoll_wait_timeouts) as f64 / elapsed,
+            "timeouts_per_sec": window_epoll_wait_timeouts as f64 / elapsed,
+            "errors_per_sec": window_epoll_wait_errors as f64 / elapsed,
+            "window_events_per_wakeup": avg(window_epoll_wait_events, window_epoll_wait_calls.saturating_sub(window_epoll_wait_timeouts)),
+            "busy_poll": {
+                "supported": EPOLL_BUSY_POLL_SUPPORTED.load(Ordering::Relaxed),
+                "enabled": EPOLL_BUSY_POLL_ENABLED.load(Ordering::Relaxed),
+                "busy_poll_usecs": EPOLL_BUSY_POLL_USECS.load(Ordering::Relaxed),
+                "busy_poll_budget": EPOLL_BUSY_POLL_BUDGET.load(Ordering::Relaxed),
+                "prefer_busy_poll": EPOLL_BUSY_POLL_PREFER.load(Ordering::Relaxed),
+                "set_errno": EPOLL_BUSY_POLL_SET_ERRNO.load(Ordering::Relaxed),
+                "get_errno": EPOLL_BUSY_POLL_GET_ERRNO.load(Ordering::Relaxed),
+            }
         },
         "stages_cumulative": cumulative_stages,
         "stages_window": window_stages,
