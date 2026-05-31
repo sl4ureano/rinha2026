@@ -31,9 +31,6 @@ x-api: &api-common
     nofile:
       soft: 65535
       hard: 65535
-    memlock:
-      soft: -1
-      hard: -1
   deploy:
     resources:
       limits:
