@@ -29,8 +29,9 @@ const CLIENT_WRITE_EVENTS: u32 =
     (libc::EPOLLIN | libc::EPOLLOUT | libc::EPOLLRDHUP | libc::EPOLLET) as u32;
 const CTRL_EVENTS: u32 = (libc::EPOLLIN | libc::EPOLLRDHUP | libc::EPOLLET) as u32;
 
-// epoll busy-poll params (Linux 6.0+)
+// epoll busy-poll params (Linux 6.9+)
 #[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
 struct EpollParams {
     busy_poll_usecs: u32,
     busy_poll_budget: u16,
@@ -38,7 +39,8 @@ struct EpollParams {
     _pad: u8,
 }
 
-const EPIOCSPARAMS: libc::c_ulong = 0x40087001;
+const EPIOCSPARAMS: libc::c_ulong = 0x40088A01;
+const EPIOCGPARAMS: libc::c_ulong = 0x80088A02;
 
 struct Conn {
     buf: [u8; BUF_CAP],
@@ -79,6 +81,16 @@ fn env_us(key: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
+fn env_truthy(key: &str) -> bool {
+    std::env::var(key)
+        .ok()
+        .map(|v| {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
+}
+
 unsafe fn pool_pop() -> Option<*mut Conn> {
     if CONN_POOL_LEN == 0 {
         return None;
@@ -97,23 +109,81 @@ unsafe fn pool_push(c: *mut Conn) {
 }
 
 fn configure_epoll_params() {
-    let busy_poll = env_us("EPOLL_BUSY_POLL_US", 200);
+    let requested = env_truthy("EPOLL_BUSY_POLL");
+    if !requested {
+        perf::set_epoll_busy_poll_result(false, false, 0, 0, 0, 0, 0);
+        eprintln!("epoll busy_poll=disabled timeout={EPOLL_TIMEOUT_MS}ms");
+        return;
+    }
+
+    let profile = std::env::var("EPOLL_BUSY_POLL_PROFILE")
+        .unwrap_or_else(|_| "B".to_string())
+        .to_ascii_uppercase();
+    let (default_usecs, default_budget) = match profile.as_str() {
+        "A" => (10, 4),
+        "B" => (25, 8),
+        "C" => (50, 16),
+        "D" => (100, 32),
+        _ => (25, 8),
+    };
+    let busy_poll = env_us("EPOLL_BUSY_POLL_US", default_usecs);
+    let budget = env_us("EPOLL_BUSY_POLL_BUDGET", default_budget) as u16;
     unsafe {
         let params = EpollParams {
             busy_poll_usecs: busy_poll,
-            busy_poll_budget: 16,
+            busy_poll_budget: budget,
             prefer_busy_poll: 1,
             _pad: 0,
         };
         let ret = libc::ioctl(EPFD, EPIOCSPARAMS, &params as *const EpollParams);
         if ret < 0 {
+            let errno = *libc::__errno_location();
+            perf::set_epoll_busy_poll_result(false, false, 0, 0, 0, errno, 0);
             eprintln!(
-                "EPIOCSPARAMS: {} (non-fatal)",
-                std::io::Error::last_os_error()
+                "EPIOCSPARAMS unsupported, continuing without epoll busy poll: {}",
+                std::io::Error::from_raw_os_error(errno)
             );
-        } else {
-            eprintln!("epoll busy_poll={busy_poll}us budget=16 timeout={EPOLL_TIMEOUT_MS}ms");
+            return;
         }
+
+        let mut actual = EpollParams::default();
+        let get_ret = libc::ioctl(EPFD, EPIOCGPARAMS, &mut actual as *mut EpollParams);
+        if get_ret < 0 {
+            let errno = *libc::__errno_location();
+            perf::set_epoll_busy_poll_result(false, false, 0, 0, 0, 0, errno);
+            eprintln!(
+                "EPIOCGPARAMS unsupported, continuing without epoll busy poll validation: {}",
+                std::io::Error::from_raw_os_error(errno)
+            );
+            return;
+        }
+
+        let applied = actual.busy_poll_usecs == busy_poll
+            && actual.busy_poll_budget == budget
+            && actual.prefer_busy_poll == 1;
+        perf::set_epoll_busy_poll_result(
+            applied,
+            applied,
+            actual.busy_poll_usecs,
+            actual.busy_poll_budget,
+            actual.prefer_busy_poll,
+            0,
+            0,
+        );
+        if !applied {
+            eprintln!(
+                "kernel ignored EPIOCSPARAMS, continuing without epoll busy poll: requested usecs={busy_poll} budget={budget} prefer=1, got usecs={} budget={} prefer={}",
+                actual.busy_poll_usecs, actual.busy_poll_budget, actual.prefer_busy_poll
+            );
+            return;
+        }
+        eprintln!(
+            "epoll busy_poll={}us budget={} prefer={} timeout={}ms",
+            actual.busy_poll_usecs,
+            actual.busy_poll_budget,
+            actual.prefer_busy_poll,
+            EPOLL_TIMEOUT_MS
+        );
     }
 }
 
@@ -216,16 +286,20 @@ unsafe fn event_loop_direct(tcp_fd: RawFd) -> ! {
     let mut events = [libc::epoll_event { events: 0, u64: 0 }; MAX_EVENTS as usize];
 
     loop {
+        let wait_start = perf::stage_start();
         let nfds = libc::epoll_wait(EPFD, events.as_mut_ptr(), MAX_EVENTS, EPOLL_TIMEOUT_MS);
+        perf::record_epoll_wait(wait_start, nfds);
         if nfds < 0 {
             continue;
         }
 
         for i in 0..nfds as usize {
+            let dispatch_start = perf::stage_start();
             let token = events[i].u64;
             let revents = events[i].events;
 
             if token == TCP_LISTEN_TOKEN {
+                perf::record_epoll_dispatch(dispatch_start);
                 accept_tcp_clients(tcp_fd);
                 continue;
             }
@@ -233,16 +307,20 @@ unsafe fn event_loop_direct(tcp_fd: RawFd) -> ! {
             let fd = token as RawFd;
 
             if revents & (libc::EPOLLHUP | libc::EPOLLERR) as u32 != 0 {
+                perf::record_epoll_dispatch(dispatch_start);
                 drop_conn(fd);
                 continue;
             }
             if revents & libc::EPOLLIN as u32 != 0 {
+                perf::record_epoll_dispatch(dispatch_start);
                 handle_client_read(fd);
             }
             if revents & libc::EPOLLOUT as u32 != 0 {
+                perf::record_epoll_dispatch(dispatch_start);
                 handle_client_write(fd);
             }
             if revents & libc::EPOLLRDHUP as u32 != 0 {
+                perf::record_epoll_dispatch(dispatch_start);
                 drop_conn(fd);
             }
         }
@@ -438,7 +516,9 @@ unsafe fn event_loop(ctrl_listen_fd: RawFd, health_fd: RawFd) -> ! {
     let mut events = [libc::epoll_event { events: 0, u64: 0 }; MAX_EVENTS as usize];
 
     loop {
+        let wait_start = perf::stage_start();
         let nfds = libc::epoll_wait(EPFD, events.as_mut_ptr(), MAX_EVENTS, EPOLL_TIMEOUT_MS);
+        perf::record_epoll_wait(wait_start, nfds);
         if nfds < 0 {
             let e = std::io::Error::last_os_error();
             if e.raw_os_error() == Some(libc::EINTR) {
@@ -448,14 +528,17 @@ unsafe fn event_loop(ctrl_listen_fd: RawFd, health_fd: RawFd) -> ! {
         }
 
         for i in 0..nfds as usize {
+            let dispatch_start = perf::stage_start();
             let token = events[i].u64;
             let revents = events[i].events;
 
             if token == CTRL_LISTEN_TOKEN {
+                perf::record_epoll_dispatch(dispatch_start);
                 accept_ctrl_conn(ctrl_listen_fd);
                 continue;
             }
             if token == HEALTH_LISTEN_TOKEN {
+                perf::record_epoll_dispatch(dispatch_start);
                 accept_health_clients(health_fd);
                 continue;
             }
@@ -464,26 +547,32 @@ unsafe fn event_loop(ctrl_listen_fd: RawFd, health_fd: RawFd) -> ! {
 
             if (fd as usize) < MAX_FDS && IS_CTRL[fd as usize] {
                 if revents & (libc::EPOLLHUP | libc::EPOLLERR | libc::EPOLLRDHUP) as u32 != 0 {
+                    perf::record_epoll_dispatch(dispatch_start);
                     libc::epoll_ctl(EPFD, libc::EPOLL_CTL_DEL, fd, std::ptr::null_mut());
                     IS_CTRL[fd as usize] = false;
                     libc::close(fd);
                 } else if revents & libc::EPOLLIN as u32 != 0 {
+                    perf::record_epoll_dispatch(dispatch_start);
                     accept_from_lb(fd);
                 }
                 continue;
             }
 
             if revents & (libc::EPOLLHUP | libc::EPOLLERR) as u32 != 0 {
+                perf::record_epoll_dispatch(dispatch_start);
                 drop_conn(fd);
                 continue;
             }
             if revents & libc::EPOLLIN as u32 != 0 {
+                perf::record_epoll_dispatch(dispatch_start);
                 handle_client_read(fd);
             }
             if revents & libc::EPOLLOUT as u32 != 0 {
+                perf::record_epoll_dispatch(dispatch_start);
                 handle_client_write(fd);
             }
             if revents & libc::EPOLLRDHUP as u32 != 0 {
+                perf::record_epoll_dispatch(dispatch_start);
                 drop_conn(fd);
             }
         }

@@ -441,6 +441,8 @@ Pinagem (`docker-compose-ghcr.yml`): api1 → CPU 0, api2 → CPU 2, lb → CPUs
 
 Resultados k6 (ramping 1 → 900 req/s, 120s, 54.100 entries):
 
+Relatório detalhado dos testes recentes no Mac Mini, incluindo `EPIOCSPARAMS`, perfis de busy poll, `CHANNELS_PER_API`, métricas internas em microssegundos e resultado final `p99=0,47 ms`: [`PERFORMANCE_TEST_REPORT.md`](PERFORMANCE_TEST_REPORT.md).
+
 ```mermaid
 xychart-beta
     title "p99 Latência por Versão (ms)"
