@@ -2,10 +2,12 @@ use fraud_detector::config::ServerConfig;
 
 #[cfg(all(target_os = "linux", not(debug_assertions)))]
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: fraud_detector::perf::CountingAllocator<mimalloc::MiMalloc> =
+    fraud_detector::perf::CountingAllocator(mimalloc::MiMalloc);
 
 fn main() {
     let cfg = ServerConfig::from_env();
+    fraud_detector::perf::init_from_env();
 
     #[cfg(target_os = "linux")]
     {
@@ -42,7 +44,9 @@ fn main() {
 
     #[cfg(not(feature = "monoio-http"))]
     {
-        eprintln!("server: set FD_PASS/CTRL_SOCK (submission) or build with --features monoio-http");
+        eprintln!(
+            "server: set FD_PASS/CTRL_SOCK (submission) or build with --features monoio-http"
+        );
         std::process::exit(1);
     }
 }

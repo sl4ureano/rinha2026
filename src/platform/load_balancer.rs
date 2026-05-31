@@ -3,6 +3,7 @@
 use std::os::fd::RawFd;
 
 use crate::config::LbConfig;
+use crate::perf;
 use crate::platform::scm::{connect_unix_once, connect_unix_retry, send_fd};
 
 const BACKLOG: libc::c_int = 65535;
@@ -38,16 +39,22 @@ impl Upstream {
 }
 
 fn handoff(upstream: &mut Upstream, client_fd: RawFd) -> bool {
+    let start = perf::stage_start();
     if upstream.fd < 0 && !upstream.reconnect() {
+        perf::record_stage(perf::STAGE_LB_HANDOFF, start);
         return false;
     }
     if send_fd(upstream.fd, client_fd) {
+        perf::record_stage(perf::STAGE_LB_HANDOFF, start);
         return true;
     }
     if !upstream.reconnect() {
+        perf::record_stage(perf::STAGE_LB_HANDOFF, start);
         return false;
     }
-    send_fd(upstream.fd, client_fd)
+    let ok = send_fd(upstream.fd, client_fd);
+    perf::record_stage(perf::STAGE_LB_HANDOFF, start);
+    ok
 }
 
 pub fn run(cfg: LbConfig) {
@@ -82,6 +89,7 @@ pub fn run(cfg: LbConfig) {
     loop {
         let mut accepted = 0usize;
         loop {
+            let accept_start = perf::stage_start();
             let client = unsafe {
                 libc::accept4(
                     listen_fd,
@@ -102,13 +110,20 @@ pub fn run(cfg: LbConfig) {
                 }
                 break;
             }
+            perf::record_stage(perf::STAGE_LB_ACCEPT, accept_start);
+            perf::lb_accepted();
 
             let first = (rr_next % upstream_count as u32) as usize;
             rr_next = rr_next.wrapping_add(1);
 
-            if !handoff(&mut upstreams[first], client) {
+            let mut handed_off = handoff(&mut upstreams[first], client);
+            perf::lb_handoff(handed_off, first);
+            if !handed_off {
                 for offset in 1..upstream_count {
-                    if handoff(&mut upstreams[(first + offset) % upstream_count], client) {
+                    let idx = (first + offset) % upstream_count;
+                    handed_off = handoff(&mut upstreams[idx], client);
+                    perf::lb_handoff(handed_off, idx);
+                    if handed_off {
                         break;
                     }
                 }

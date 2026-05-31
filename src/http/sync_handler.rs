@@ -4,13 +4,15 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::io::{FromRawFd, RawFd};
 
-use crate::ingest::extract;
 use crate::http::response;
+use crate::ingest::extract;
+use crate::perf;
 use crate::search::tier_fraud_count;
 
 const REQ_CAP: usize = 65536;
 
 pub fn serve_connection(fd: RawFd) {
+    let _conn_guard = perf::connection_guard();
     let mut stream = unsafe { TcpStream::from_raw_fd(fd) };
     let _ = stream.set_nodelay(true);
 
@@ -22,6 +24,7 @@ pub fn serve_connection(fd: RawFd) {
             Ok(0) | Err(_) => return,
             Ok(n) => n,
         };
+        perf::add_bytes_received(n);
         if req_buf.len() + n > REQ_CAP {
             return;
         }
@@ -52,6 +55,8 @@ enum HandleOutcome {
 }
 
 fn try_handle_one(stream: &mut TcpStream, buf: &[u8]) -> HandleOutcome {
+    let total_start = perf::stage_start();
+    let validation_start = perf::stage_start();
     let header_end = match find_double_crlf(buf) {
         Some(p) => p,
         None => return HandleOutcome::NeedMore,
@@ -61,16 +66,23 @@ fn try_handle_one(stream: &mut TcpStream, buf: &[u8]) -> HandleOutcome {
         let cl = match content_length_fast(&buf[..header_end]) {
             Some(c) => c,
             None => {
+                perf::record_stage(perf::STAGE_VALIDATION, validation_start);
                 let _ = write_resp(stream, response::RESP_DENIED_S10);
+                perf::record_request(total_start, false);
                 return HandleOutcome::Consumed(header_end);
             }
         };
         if buf.len() < header_end + cl {
             return HandleOutcome::NeedMore;
         }
+        perf::record_stage(perf::STAGE_VALIDATION, validation_start);
         let body = &buf[header_end..header_end + cl];
-        let fc = fraud_count_body(body);
-        let _ = write_resp(stream, response::for_count(fc));
+        let (fc, success) = fraud_count_body(body);
+        let serialize_start = perf::stage_start();
+        let resp = response::for_count(fc);
+        perf::record_stage(perf::STAGE_SERIALIZE, serialize_start);
+        let _ = write_resp(stream, resp);
+        perf::record_request(total_start, success);
         return HandleOutcome::Consumed(header_end + cl);
     }
 
@@ -81,13 +93,17 @@ fn try_handle_one(stream: &mut TcpStream, buf: &[u8]) -> HandleOutcome {
     let (method, path) = match parse_request_line(&buf[..request_line_end]) {
         Some(x) => x,
         None => {
+            perf::record_stage(perf::STAGE_VALIDATION, validation_start);
             let _ = write_resp(stream, response::RESP_DENIED_S10);
+            perf::record_request(total_start, false);
             return HandleOutcome::Consumed(header_end);
         }
     };
 
     if method == b"GET" && path == b"/ready" {
+        perf::record_stage(perf::STAGE_VALIDATION, validation_start);
         let _ = write_resp(stream, response::RESP_READY);
+        perf::record_request(total_start, true);
         return HandleOutcome::Consumed(header_end);
     }
 
@@ -95,33 +111,53 @@ fn try_handle_one(stream: &mut TcpStream, buf: &[u8]) -> HandleOutcome {
         let cl = match content_length_fast(&buf[..header_end]) {
             Some(c) => c,
             None => {
+                perf::record_stage(perf::STAGE_VALIDATION, validation_start);
                 let _ = write_resp(stream, response::RESP_DENIED_S10);
+                perf::record_request(total_start, false);
                 return HandleOutcome::Consumed(header_end);
             }
         };
         if buf.len() < header_end + cl {
             return HandleOutcome::NeedMore;
         }
+        perf::record_stage(perf::STAGE_VALIDATION, validation_start);
         let body = &buf[header_end..header_end + cl];
-        let fc = fraud_count_body(body);
-        let _ = write_resp(stream, response::for_count(fc));
+        let (fc, success) = fraud_count_body(body);
+        let serialize_start = perf::stage_start();
+        let resp = response::for_count(fc);
+        perf::record_stage(perf::STAGE_SERIALIZE, serialize_start);
+        let _ = write_resp(stream, resp);
+        perf::record_request(total_start, success);
         return HandleOutcome::Consumed(header_end + cl);
     }
 
+    perf::record_stage(perf::STAGE_VALIDATION, validation_start);
     let _ = write_resp(stream, response::RESP_NOT_FOUND);
+    perf::record_request(total_start, false);
     HandleOutcome::Consumed(header_end)
 }
 
 #[inline]
-fn fraud_count_body(body: &[u8]) -> u8 {
+fn fraud_count_body(body: &[u8]) -> (u8, bool) {
     match extract(body) {
-        Some(p) => tier_fraud_count(&p),
-        None => 5,
+        Some(p) => {
+            let decision_start = perf::stage_start();
+            let count = tier_fraud_count(&p);
+            perf::record_stage(perf::STAGE_DECISION_TREE, decision_start);
+            (count, true)
+        }
+        None => (5, false),
     }
 }
 
 fn write_resp(stream: &mut TcpStream, payload: &[u8]) -> std::io::Result<()> {
-    stream.write_all(payload)
+    let write_start = perf::stage_start();
+    let result = stream.write_all(payload);
+    perf::record_stage(perf::STAGE_WRITE_RESPONSE, write_start);
+    if result.is_ok() {
+        perf::add_bytes_sent(payload.len());
+    }
+    result
 }
 
 fn parse_request_line(line: &[u8]) -> Option<(&[u8], &[u8])> {

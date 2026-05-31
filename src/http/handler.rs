@@ -1,7 +1,8 @@
+use crate::http::response;
 use crate::index::Index;
 use crate::ingest::extract;
+use crate::perf;
 use crate::search::tier_fraud_count;
-use crate::http::response;
 use monoio::io::{AsyncReadRent, AsyncWriteRentExt};
 use std::sync::Arc;
 
@@ -9,6 +10,7 @@ pub async fn handle_connection<S>(index: Arc<Index>, mut stream: S)
 where
     S: AsyncReadRent + AsyncWriteRentExt,
 {
+    let _conn_guard = perf::connection_guard();
     let mut req_buf: Vec<u8> = Vec::with_capacity(2048);
     let mut read_buf = vec![0u8; 8192];
     loop {
@@ -18,6 +20,7 @@ where
             Ok(n) => n,
             Err(_) => return,
         };
+        perf::add_bytes_received(n);
         req_buf.extend_from_slice(&tmp[..n]);
         read_buf = tmp;
 
@@ -51,6 +54,8 @@ async fn try_handle_one<S>(index: &Arc<Index>, stream: &mut S, buf: &[u8]) -> Ha
 where
     S: AsyncWriteRentExt,
 {
+    let total_start = perf::stage_start();
+    let validation_start = perf::stage_start();
     // Need full headers
     let header_end = match find_double_crlf(buf) {
         Some(p) => p,
@@ -61,15 +66,20 @@ where
         let cl = match content_length_fast(&buf[..header_end]) {
             Some(c) => c,
             None => {
+                perf::record_stage(perf::STAGE_VALIDATION, validation_start);
                 send_static(stream, response::RESP_DENIED_S10).await;
+                perf::record_request(total_start, false);
                 return HandleResult::Consumed(header_end);
             }
         };
         if buf.len() < header_end + cl {
             return HandleResult::NeedMore;
         }
+        perf::record_stage(perf::STAGE_VALIDATION, validation_start);
         let body = &buf[header_end..header_end + cl];
-        send_static(stream, fraud_response(index, body)).await;
+        let (resp, success) = fraud_response(index, body);
+        send_static(stream, resp).await;
+        perf::record_request(total_start, success);
         return HandleResult::Consumed(header_end + cl);
     }
 
@@ -82,13 +92,17 @@ where
     let (method, path) = match parse_request_line(request_line) {
         Some((m, p)) => (m, p),
         None => {
+            perf::record_stage(perf::STAGE_VALIDATION, validation_start);
             send_static(stream, response::RESP_DENIED_S10).await;
+            perf::record_request(total_start, false);
             return HandleResult::Consumed(header_end);
         }
     };
 
     if method == b"GET" && path == b"/ready" {
+        perf::record_stage(perf::STAGE_VALIDATION, validation_start);
         send_static(stream, response::RESP_READY).await;
+        perf::record_request(total_start, true);
         return HandleResult::Consumed(header_end);
     }
 
@@ -96,34 +110,54 @@ where
         let cl = match content_length(&buf[..header_end]) {
             Some(c) => c,
             None => {
+                perf::record_stage(perf::STAGE_VALIDATION, validation_start);
                 send_static(stream, response::RESP_DENIED_S10).await;
+                perf::record_request(total_start, false);
                 return HandleResult::Consumed(header_end);
             }
         };
         if buf.len() < header_end + cl {
             return HandleResult::NeedMore;
         }
+        perf::record_stage(perf::STAGE_VALIDATION, validation_start);
         let body = &buf[header_end..header_end + cl];
-        send_static(stream, fraud_response(index, body)).await;
+        let (resp, success) = fraud_response(index, body);
+        send_static(stream, resp).await;
+        perf::record_request(total_start, success);
         return HandleResult::Consumed(header_end + cl);
     }
 
+    perf::record_stage(perf::STAGE_VALIDATION, validation_start);
     send_static(stream, response::RESP_NOT_FOUND).await;
+    perf::record_request(total_start, false);
     HandleResult::Consumed(header_end)
 }
 
 #[inline]
-fn fraud_response(_index: &Index, body: &[u8]) -> &'static [u8] {
+fn fraud_response(_index: &Index, body: &[u8]) -> (&'static [u8], bool) {
     match extract(body) {
-        Some(p) => response::for_count(tier_fraud_count(&p)),
-        None => response::RESP_DENIED_S10,
+        Some(p) => {
+            let decision_start = perf::stage_start();
+            let count = tier_fraud_count(&p);
+            perf::record_stage(perf::STAGE_DECISION_TREE, decision_start);
+            let serialize_start = perf::stage_start();
+            let resp = response::for_count(count);
+            perf::record_stage(perf::STAGE_SERIALIZE, serialize_start);
+            (resp, true)
+        }
+        None => (response::RESP_DENIED_S10, false),
     }
 }
 
 async fn send_static<S: AsyncWriteRentExt>(stream: &mut S, payload: &'static [u8]) {
     // monoio's IoBuf is impl'd for &'static [u8], so we can hand the static slice directly
     // — zero allocation per response.
-    let _ = stream.write_all(payload).await;
+    let write_start = perf::stage_start();
+    let (res, _) = stream.write_all(payload).await;
+    perf::record_stage(perf::STAGE_WRITE_RESPONSE, write_start);
+    if res.is_ok() {
+        perf::add_bytes_sent(payload.len());
+    }
 }
 
 fn parse_request_line(line: &[u8]) -> Option<(&[u8], &[u8])> {
