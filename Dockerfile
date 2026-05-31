@@ -1,9 +1,11 @@
 ## Stage 1: build API + lb + build-index (hybrid: fast_path + k-NN)
-FROM rust:1.84-bookworm AS app-builder
+ARG RUST_IMAGE=rustlang/rust:nightly
+FROM ${RUST_IMAGE} AS app-builder
 
 WORKDIR /app
 # Haswell ≈ Mac Mini da prova (linux-amd64); submission agora inclui k-NN.
-ENV RUSTFLAGS="-C target-cpu=haswell -C opt-level=3"
+ARG BUILD_RUSTFLAGS="-C target-cpu=haswell -Z tune-cpu=haswell"
+ENV RUSTFLAGS="${BUILD_RUSTFLAGS}"
 
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/

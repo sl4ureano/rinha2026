@@ -1,7 +1,13 @@
+x-app-build: &app-build
+  context: .
+  args:
+    RUST_IMAGE: ${RUST_IMAGE:-rustlang/rust:nightly}
+    BUILD_RUSTFLAGS: ${BUILD_RUSTFLAGS:--C target-cpu=haswell -Z tune-cpu=haswell}
+
 services:
   lb:
-    build:
-      context: .
+    image: ${RINHA_IMAGE:-rinha2026:local}
+    build: *app-build
     command: ["./lb"]
     environment:
       - LB_PORT=9999
@@ -32,8 +38,8 @@ services:
       - rinha
 
   api1:
-    build:
-      context: .
+    image: ${RINHA_IMAGE:-rinha2026:local}
+    build: *app-build
     environment:
       - FD_PASS=1
       - CTRL_SOCK=/tmp/sockets/api1.sock
@@ -61,8 +67,8 @@ services:
       - rinha
 
   api2:
-    build:
-      context: .
+    image: ${RINHA_IMAGE:-rinha2026:local}
+    build: *app-build
     network_mode: "none"
     environment:
       - FD_PASS=1
