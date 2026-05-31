@@ -18,7 +18,7 @@ x-api: &api-common
     - TIER_ONLY=1
     - EPOLL_BUSY_POLL=1
     - EPOLL_BUSY_POLL_PROFILE=D
-    - WARMUP_QUERIES=8192
+    - WARMUP_QUERIES=4096
   healthcheck:
     test: ["CMD", "/app/healthcheck"]
     interval: 1s
@@ -31,6 +31,9 @@ x-api: &api-common
     nofile:
       soft: 65535
       hard: 65535
+    memlock:
+      soft: -1
+      hard: -1
   deploy:
     resources:
       limits:
@@ -50,7 +53,7 @@ services:
       - TIER_ONLY=1
       - EPOLL_BUSY_POLL=1
       - EPOLL_BUSY_POLL_PROFILE=D
-      - WARMUP_QUERIES=8192
+      - WARMUP_QUERIES=4096
     networks:
       - rinha
 
@@ -65,7 +68,7 @@ services:
       - TIER_ONLY=1
       - EPOLL_BUSY_POLL=1
       - EPOLL_BUSY_POLL_PROFILE=D
-      - WARMUP_QUERIES=8192
+      - WARMUP_QUERIES=4096
 
   lb:
     image: ghcr.io/sl4ureano/rinha2026:oraculo
@@ -76,7 +79,7 @@ services:
       - LB_PORT=9999
       - API1_SOCKET=/tmp/sockets/api1.sock
       - API2_SOCKET=/tmp/sockets/api2.sock
-      - CHANNELS_PER_API=2
+      - CHANNELS_PER_API=4
     ports:
       - "9999:9999"
     depends_on:
