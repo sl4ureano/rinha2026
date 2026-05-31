@@ -44,10 +44,8 @@ services:
       - CTRL_SOCK=/tmp/sockets/api1.sock
       - PORT=8080
       - TIER_ONLY=1
-      - ENABLE_REMOTE_PROFILING=true
-      - PERF_ROLE=api1
-      - PERF_RELAY_SOCKET=/tmp/sockets/perf.sock
-      - PERF_SNAPSHOT_INTERVAL_SECS=10
+      - EPOLL_BUSY_POLL=1
+      - EPOLL_BUSY_POLL_PROFILE=D
     networks:
       - rinha
 
@@ -60,10 +58,8 @@ services:
       - CTRL_SOCK=/tmp/sockets/api2.sock
       - PORT=8080
       - TIER_ONLY=1
-      - ENABLE_REMOTE_PROFILING=true
-      - PERF_ROLE=api2
-      - PERF_RELAY_SOCKET=/tmp/sockets/perf.sock
-      - PERF_SNAPSHOT_INTERVAL_SECS=10
+      - EPOLL_BUSY_POLL=1
+      - EPOLL_BUSY_POLL_PROFILE=D
 
   lb:
     image: ghcr.io/sl4ureano/rinha2026:oraculo
@@ -74,14 +70,8 @@ services:
       - LB_PORT=9999
       - API1_SOCKET=/tmp/sockets/api1.sock
       - API2_SOCKET=/tmp/sockets/api2.sock
-      - CHANNELS_PER_API=4
-      - ENABLE_REMOTE_PROFILING=true
-      - PERF_ROLE=lb
-      - PERF_WEBHOOK_URL=http://216.238.100.69:8080/perf
-      - PERF_RELAY_SOCKET=/tmp/sockets/perf.sock
-      - PERF_RELAY_LISTEN=true
-      - PERF_SNAPSHOT_INTERVAL_SECS=10
-      - PERF_FINAL_WEBHOOK_TIMEOUT_MS=1500
+      - CHANNELS_PER_API=2
+
     ports:
       - "9999:9999"
     depends_on:
