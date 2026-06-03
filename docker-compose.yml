@@ -40,6 +40,7 @@ services:
   api1:
     image: ${RINHA_IMAGE:-rinha2026:local}
     build: *app-build
+    network_mode: "none"
     environment:
       - FD_PASS=1
       - CTRL_SOCK=/tmp/sockets/api1.sock
@@ -63,8 +64,6 @@ services:
           memory: 169M
     logging:
       driver: none
-    networks:
-      - rinha
 
   api2:
     image: ${RINHA_IMAGE:-rinha2026:local}

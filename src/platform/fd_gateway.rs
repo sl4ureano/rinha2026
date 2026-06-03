@@ -1,5 +1,6 @@
 //! Epoll-based event-driven FD gateway: LB envia TCP FDs via SCM_RIGHTS;
 //! single-threaded epoll loop processes all connections without spawning threads.
+//! Uses io_uring for batched send+close operations (reduces syscalls per request).
 #![allow(static_mut_refs)]
 
 use std::os::unix::io::RawFd;
@@ -13,6 +14,8 @@ use crate::ingest::extract;
 use crate::perf;
 use crate::search::{complete_cache, run_warmup, tier_gray_count, try_fast_fraud_count};
 
+use io_uring::{opcode, types, IoUring};
+
 /// Limite de fds rastreados (8k cobre a prova; evita ~512 KiB de tabela estática).
 const MAX_FDS: usize = 8192;
 const MAX_EVENTS: i32 = 512;
@@ -22,6 +25,10 @@ const CTRL_LISTEN_TOKEN: u64 = u64::MAX;
 const TCP_LISTEN_TOKEN: u64 = u64::MAX - 1;
 const HEALTH_LISTEN_TOKEN: u64 = u64::MAX - 2;
 const EPOLL_TIMEOUT_MS: i32 = 1;
+/// epoll_pwait2 timeout in microseconds (replaces 1ms epoll_wait).
+/// Kernel busy poll (EPIOCSPARAMS) handles low-latency polling without
+/// burning CPU quota — no userspace spin loop needed.
+const EPOLL_IDLE_US: i64 = 60;
 
 // Edge-triggered flags
 const CLIENT_EVENTS: u32 = (libc::EPOLLIN | libc::EPOLLRDHUP | libc::EPOLLET) as u32;
@@ -73,6 +80,75 @@ static mut CONN_POOL: [*mut Conn; CONN_POOL_CAP] = [std::ptr::null_mut(); CONN_P
 static mut CONN_POOL_LEN: usize = 0;
 static mut EPFD: RawFd = -1;
 static mut INDEX_PTR: *const Index = std::ptr::null();
+static mut URING: Option<IoUring> = None;
+static mut URING_PENDING: u32 = 0;
+
+/// Initialize io_uring ring. Falls back to direct send if unsupported.
+unsafe fn init_uring() {
+    match IoUring::new(256) {
+        Ok(ring) => {
+            eprintln!("io_uring initialized (256 entries)");
+            URING = Some(ring);
+        }
+        Err(e) => {
+            eprintln!("io_uring unavailable, using direct send: {e}");
+        }
+    }
+}
+
+/// Submit a SEND + CLOSE pair to io_uring. Returns true if submitted.
+/// If io_uring is unavailable or full, returns false (caller should fallback).
+#[inline]
+unsafe fn uring_send_close(fd: RawFd, buf: *const u8, len: usize) -> bool {
+    let ring = match URING.as_mut() {
+        Some(r) => r,
+        None => return false,
+    };
+
+    let mut sq = ring.submission();
+    if sq.len() + 2 > sq.capacity() {
+        // Ring is full — drain and retry once
+        drop(sq);
+        uring_flush();
+        sq = ring.submission();
+        if sq.len() + 2 > sq.capacity() {
+            return false;
+        }
+    }
+
+    // SEND SQE (linked to CLOSE)
+    let send_e = opcode::Send::new(types::Fd(fd), buf, len as u32)
+        .build()
+        .flags(io_uring::squeue::Flags::IO_LINK);
+
+    // CLOSE SQE
+    let close_e = opcode::Close::new(types::Fd(fd))
+        .build();
+
+    let _ = sq.push(&send_e);
+    let _ = sq.push(&close_e);
+    URING_PENDING += 2;
+    true
+}
+
+/// Submit all pending SQEs and drain completed CQEs.
+#[inline]
+unsafe fn uring_flush() {
+    let ring = match URING.as_mut() {
+        Some(r) => r,
+        None => return,
+    };
+    if URING_PENDING > 0 {
+        let _ = ring.submit();
+        URING_PENDING = 0;
+    }
+    // Drain CQEs (non-blocking)
+    let cq = ring.completion();
+    for _cqe in cq {
+        // Fire-and-forget: we don't need to handle completions
+        // since send errors just mean the client disconnected
+    }
+}
 
 fn env_us(key: &str, default: u32) -> u32 {
     std::env::var(key)
@@ -187,6 +263,33 @@ fn configure_epoll_params() {
     }
 }
 
+/// epoll_pwait2 com timeout em microsegundos.
+/// Não faz spin loop em userspace — kernel busy poll (EPIOCSPARAMS) cuida disso
+/// sem queimar CPU quota.
+#[inline]
+unsafe fn epoll_wait_us(events: *mut libc::epoll_event, max_events: i32, timeout_us: i64) -> i32 {
+    let timeout = libc::timespec {
+        tv_sec: timeout_us / 1_000_000,
+        tv_nsec: (timeout_us % 1_000_000) * 1_000,
+    };
+    let n = libc::epoll_pwait2(
+        EPFD,
+        events,
+        max_events,
+        &timeout,
+        std::ptr::null(),
+    );
+    if n >= 0 {
+        return n;
+    }
+    // Fallback: se epoll_pwait2 não é suportado (ENOSYS), usa epoll_wait com ms
+    let err = *libc::__errno_location();
+    if err == libc::ENOSYS || err == libc::EINVAL {
+        return libc::epoll_wait(EPFD, events, max_events, EPOLL_TIMEOUT_MS);
+    }
+    n
+}
+
 /// Re-arm client fd for epoll (MOD if already registered, else ADD).
 #[inline]
 unsafe fn epoll_arm(fd: RawFd, events: u32) {
@@ -239,12 +342,27 @@ unsafe fn drop_conn(fd: RawFd) {
         perf::connection_closed();
     }
     libc::epoll_ctl(EPFD, libc::EPOLL_CTL_DEL, fd, std::ptr::null_mut());
+    uring_close(fd);
+}
+
+/// Submit CLOSE to io_uring (batched), fallback to libc::close.
+#[inline]
+unsafe fn uring_close(fd: RawFd) {
+    if let Some(ring) = URING.as_mut() {
+        let close_e = opcode::Close::new(types::Fd(fd)).build();
+        let mut sq = ring.submission();
+        if sq.push(&close_e).is_ok() {
+            URING_PENDING += 1;
+            return;
+        }
+    }
     libc::close(fd);
 }
 
 #[inline]
 unsafe fn socket_write(fd: RawFd, ptr: *const u8, len: usize) -> isize {
-    libc::write(fd, ptr as *const _, len) as isize
+    // send com MSG_NOSIGNAL evita SIGPIPE e é equivalent a write para TCP
+    libc::send(fd, ptr as *const _, len, libc::MSG_NOSIGNAL) as isize
 }
 
 /// Direct TCP mode: server listens on TCP port directly (no LB, no fd-passing).
@@ -275,6 +393,7 @@ pub fn run_direct(index: Arc<Index>, port: u16) -> anyhow::Result<()> {
         };
         libc::epoll_ctl(EPFD, libc::EPOLL_CTL_ADD, tcp_fd, &mut ev);
 
+        init_uring();
         run_warmup();
         crate::perf::reset();
         event_loop_direct(tcp_fd);
@@ -287,7 +406,7 @@ unsafe fn event_loop_direct(tcp_fd: RawFd) -> ! {
 
     loop {
         let wait_start = perf::stage_start();
-        let nfds = libc::epoll_wait(EPFD, events.as_mut_ptr(), MAX_EVENTS, EPOLL_TIMEOUT_MS);
+        let nfds = epoll_wait_us(events.as_mut_ptr(), MAX_EVENTS, EPOLL_IDLE_US);
         perf::record_epoll_wait(wait_start, nfds);
         if nfds < 0 {
             continue;
@@ -324,6 +443,8 @@ unsafe fn event_loop_direct(tcp_fd: RawFd) -> ! {
                 drop_conn(fd);
             }
         }
+
+        uring_flush();
     }
 }
 
@@ -358,6 +479,7 @@ unsafe fn accept_tcp_clients(tcp_fd: RawFd) {
             &one as *const _ as *const _,
             4,
         );
+
 
         let c = get_conn(client_fd);
         if c.is_null() {
@@ -506,6 +628,7 @@ pub fn run(sock_path: &Path, index: Arc<Index>, health_port: u16) -> anyhow::Res
         ev.u64 = HEALTH_LISTEN_TOKEN;
         libc::epoll_ctl(EPFD, libc::EPOLL_CTL_ADD, health_fd, &mut ev);
 
+        init_uring();
         run_warmup();
         crate::perf::reset();
         event_loop(ctrl_listen_fd, health_fd);
@@ -517,7 +640,7 @@ unsafe fn event_loop(ctrl_listen_fd: RawFd, health_fd: RawFd) -> ! {
 
     loop {
         let wait_start = perf::stage_start();
-        let nfds = libc::epoll_wait(EPFD, events.as_mut_ptr(), MAX_EVENTS, EPOLL_TIMEOUT_MS);
+        let nfds = epoll_wait_us(events.as_mut_ptr(), MAX_EVENTS, EPOLL_IDLE_US);
         perf::record_epoll_wait(wait_start, nfds);
         if nfds < 0 {
             let e = std::io::Error::last_os_error();
@@ -576,6 +699,9 @@ unsafe fn event_loop(ctrl_listen_fd: RawFd, health_fd: RawFd) -> ! {
                 drop_conn(fd);
             }
         }
+
+        // Submit all queued io_uring SQEs in one syscall
+        uring_flush();
     }
 }
 
@@ -641,24 +767,8 @@ unsafe fn accept_from_lb(ctrl: RawFd) {
             continue;
         }
 
-        // Set socket options here (LB sends bare fd for minimum overhead)
-        let one: libc::c_int = 1;
-        let sockopt_start = perf::stage_start();
-        libc::setsockopt(
-            client_fd,
-            libc::IPPROTO_TCP,
-            libc::TCP_NODELAY,
-            &one as *const _ as *const _,
-            4,
-        );
-        libc::setsockopt(
-            client_fd,
-            libc::IPPROTO_TCP,
-            libc::TCP_QUICKACK,
-            &one as *const _ as *const _,
-            4,
-        );
-        perf::record_stage(perf::STAGE_API_SETSOCKOPT, sockopt_start);
+        // TCP_NODELAY+QUICKACK já aplicados no LB antes do fd-passing.
+        // Nenhum setsockopt necessário aqui — elimina ~5-10μs do hot path.
 
         let c = get_conn(client_fd);
         if c.is_null() {
@@ -1103,6 +1213,21 @@ unsafe fn send_response_inline(fd: RawFd, resp: &[u8]) {
 
 #[inline]
 unsafe fn send_and_close(fd: RawFd, resp: &[u8]) {
+    // Try io_uring path: batch send+close in one submission
+    if uring_send_close(fd, resp.as_ptr(), resp.len()) {
+        perf::send_call();
+        perf::add_bytes_sent(resp.len());
+        // Release conn state (fd will be closed by io_uring)
+        let idx = fd as usize;
+        if idx < MAX_FDS && !CONNS[idx].is_null() {
+            pool_push(CONNS[idx]);
+            CONNS[idx] = std::ptr::null_mut();
+            perf::connection_closed();
+        }
+        libc::epoll_ctl(EPFD, libc::EPOLL_CTL_DEL, fd, std::ptr::null_mut());
+        return;
+    }
+    // Fallback: direct send + close
     send_response_inline(fd, resp);
     drop_conn(fd);
 }

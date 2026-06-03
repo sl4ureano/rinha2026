@@ -113,6 +113,25 @@ pub fn run(cfg: LbConfig) {
             perf::record_stage(perf::STAGE_LB_ACCEPT, accept_start);
             perf::lb_accepted();
 
+            // TCP tuning no LB: elimina setsockopt do hot path do API
+            unsafe {
+                let one: libc::c_int = 1;
+                libc::setsockopt(
+                    client,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_NODELAY,
+                    &one as *const _ as *const _,
+                    4,
+                );
+                libc::setsockopt(
+                    client,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_QUICKACK,
+                    &one as *const _ as *const _,
+                    4,
+                );
+            }
+
             let first = (rr_next % upstream_count as u32) as usize;
             rr_next = rr_next.wrapping_add(1);
 
@@ -131,7 +150,7 @@ pub fn run(cfg: LbConfig) {
             unsafe { libc::close(client) };
 
             accepted += 1;
-            if accepted >= 64 {
+            if accepted >= 128 {
                 break;
             }
         }
