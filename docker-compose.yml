@@ -45,6 +45,7 @@ services:
       - CTRL_SOCK=/tmp/sockets/api1.sock
       - PORT=8080
       - EPOLL_BUSY_POLL=1
+      - TIER_ONLY=1
 
   api2:
     <<: *api-common
@@ -55,6 +56,7 @@ services:
       - CTRL_SOCK=/tmp/sockets/api2.sock
       - PORT=8080
       - EPOLL_BUSY_POLL=1
+      - TIER_ONLY=1
 
   lb:
     image: ghcr.io/sl4ureano/rinha2026:super
