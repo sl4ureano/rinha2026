@@ -1,8 +1,73 @@
+# Mac Mini da prova (i5 Haswell, 2 núcleos / 4 threads):
+#   CPU 0 + 1 = mesmo núcleo físico
+#   CPU 2 + 3 = outro núcleo físico
+#
+# Pinagem:
+#   api1 → CPU 0  (núcleo físico, carga pesada tier_score)
+#   api2 → CPU 2  (outro núcleo físico)
+#   lb   → CPU 3 (HT do core 1, só accept+fd-pass; quota 0.10 CPU)
+#
+# Quota total: 0.45 + 0.45 + 0.10 = 1.00 CPU | 169+169+8+4 (tmpfs) = 350 MB
+
+x-api: &api-common
+  image: ghcr.io/sl4ureano/rinha2026:agora-vai
+  pull_policy: always
+  environment:
+    - FD_PASS=1
+    - PORT=8080
+  healthcheck:
+    test: ["CMD", "/app/healthcheck"]
+    interval: 1s
+    timeout: 1s
+    retries: 30
+    start_period: 15s
+  volumes:
+    - sockets:/tmp/sockets
+  ulimits:
+    nofile:
+      soft: 65535
+      hard: 65535
+  deploy:
+    resources:
+      limits:
+        cpus: "0.45"
+        memory: 169M
+  logging:
+    driver: none
+
 services:
+  api1:
+    <<: *api-common
+    cpuset: "0"
+    environment:
+      - FD_PASS=1
+      - CTRL_SOCK=/tmp/sockets/api1.sock
+      - PORT=8080
+      - EPOLL_BUSY_POLL=1
+      - EPOLL_BUSY_POLL_US=50
+      - EPOLL_BUSY_POLL_BUDGET=8
+      - EPOLL_SPIN_US=50
+    networks:
+      - rinha
+
+  api2:
+    <<: *api-common
+    cpuset: "2"
+    network_mode: "none"
+    environment:
+      - FD_PASS=1
+      - CTRL_SOCK=/tmp/sockets/api2.sock
+      - PORT=8080
+      - EPOLL_BUSY_POLL=1
+      - EPOLL_BUSY_POLL_US=50
+      - EPOLL_BUSY_POLL_BUDGET=8
+      - EPOLL_SPIN_US=50
+
   lb:
-    image: ghcr.io/sl4ureano/rinha2026:ultimate-rust
+    image: ghcr.io/sl4ureano/rinha2026:agora-vai
+    pull_policy: always
+    cpuset: "3"
     command: ["./lb"]
-    cpuset: "2,3"
     environment:
       - LB_PORT=9999
       - API1_SOCKET=/tmp/sockets/api1.sock
@@ -30,63 +95,6 @@ services:
       driver: none
     networks:
       - rinha
-
-  api1:
-    image: ghcr.io/sl4ureano/rinha2026:ultimate-rust
-    cpuset: "0"
-    environment:
-      - FD_PASS=1
-      - CTRL_SOCK=/tmp/sockets/api1.sock
-      - PORT=8080
-    healthcheck:
-      test: ["CMD", "/app/healthcheck"]
-      interval: 1s
-      timeout: 1s
-      retries: 30
-      start_period: 15s
-    volumes:
-      - sockets:/tmp/sockets
-    ulimits:
-      nofile:
-        soft: 65535
-        hard: 65535
-    deploy:
-      resources:
-        limits:
-          cpus: "0.45"
-          memory: 169M
-    logging:
-      driver: none
-    networks:
-      - rinha
-
-  api2:
-    image: ghcr.io/sl4ureano/rinha2026:ultimate-rust
-    cpuset: "1"
-    network_mode: "none"
-    environment:
-      - FD_PASS=1
-      - CTRL_SOCK=/tmp/sockets/api2.sock
-      - PORT=8080
-    healthcheck:
-      test: ["CMD", "/app/healthcheck"]
-      interval: 1s
-      timeout: 1s
-      retries: 30
-      start_period: 15s
-    volumes:
-      - sockets:/tmp/sockets
-    ulimits:
-      nofile:
-        soft: 65535
-        hard: 65535
-    deploy:
-      resources:
-        limits:
-          cpus: "0.45"
-          memory: 169M
-    logging:
-      driver: none
 
 volumes:
   sockets:
