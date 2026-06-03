@@ -44,6 +44,7 @@ services:
       - FD_PASS=1
       - CTRL_SOCK=/tmp/sockets/api1.sock
       - PORT=8080
+      - EPOLL_BUSY_POLL=1
 
   api2:
     <<: *api-common
@@ -53,6 +54,7 @@ services:
       - FD_PASS=1
       - CTRL_SOCK=/tmp/sockets/api2.sock
       - PORT=8080
+      - EPOLL_BUSY_POLL=1
 
   lb:
     image: ghcr.io/sl4ureano/rinha2026:super
@@ -98,5 +100,3 @@ volumes:
 networks:
   rinha:
     driver: bridge
-    driver_opts:
-      com.docker.network.driver.mtu: "65535"
