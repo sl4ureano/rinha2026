@@ -2,15 +2,15 @@
 #   CPU 0 + 1 = mesmo núcleo físico
 #   CPU 2 + 3 = outro núcleo físico
 #
-# Pinagem:
-#   api1 → CPU 0  (núcleo físico, carga pesada tier_score)
-#   api2 → CPU 2  (outro núcleo físico)
-#   lb   → CPU 3 (HT do core 1, só accept+fd-pass; quota 0.10 CPU)
+# Pinagem (equalizada com lucasmontano/fksegundo):
+#   api1 → CPU 0  (núcleo físico)
+#   api2 → CPU 1  (mesmo núcleo, HT — ambos APIs nos cores rápidos)
+#   lb   → CPU 2,3 (outro núcleo físico, só accept+fd-pass)
 #
 # Quota total: 0.45 + 0.45 + 0.10 = 1.00 CPU | 169+169+8+4 (tmpfs) = 350 MB
 
 x-api: &api-common
-  image: ghcr.io/sl4ureano/rinha2026:agora-vai
+  image: ghcr.io/sl4ureano/rinha2026:super
   pull_policy: always
   environment:
     - FD_PASS=1
@@ -30,8 +30,8 @@ x-api: &api-common
   deploy:
     resources:
       limits:
-        cpus: "0.35"
-        memory: 165MB
+        cpus: "0.45"
+        memory: 169M
   logging:
     driver: none
 
@@ -39,16 +39,11 @@ services:
   api1:
     <<: *api-common
     cpuset: "0"
+    network_mode: "none"
     environment:
       - FD_PASS=1
       - CTRL_SOCK=/tmp/sockets/api1.sock
       - PORT=8080
-      - EPOLL_BUSY_POLL=1
-      - EPOLL_BUSY_POLL_US=50
-      - EPOLL_BUSY_POLL_BUDGET=8
-      - EPOLL_SPIN_US=50
-    networks:
-      - rinha
 
   api2:
     <<: *api-common
@@ -58,13 +53,9 @@ services:
       - FD_PASS=1
       - CTRL_SOCK=/tmp/sockets/api2.sock
       - PORT=8080
-      - EPOLL_BUSY_POLL=1
-      - EPOLL_BUSY_POLL_US=50
-      - EPOLL_BUSY_POLL_BUDGET=8
-      - EPOLL_SPIN_US=50
 
   lb:
-    image: ghcr.io/sl4ureano/rinha2026:agora-vai
+    image: ghcr.io/sl4ureano/rinha2026:super
     pull_policy: always
     cpuset: "2,3"
     command: ["./lb"]
@@ -72,7 +63,7 @@ services:
       - LB_PORT=9999
       - API1_SOCKET=/tmp/sockets/api1.sock
       - API2_SOCKET=/tmp/sockets/api2.sock
-      - CHANNELS_PER_API=2
+      - CHANNELS_PER_API=4
     ports:
       - "9999:9999"
     depends_on:
@@ -89,8 +80,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.30"
-          memory: "20MB"
+          cpus: "0.10"
+          memory: 8M
     logging:
       driver: none
     networks:
@@ -107,3 +98,5 @@ volumes:
 networks:
   rinha:
     driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: "65535"
