@@ -1,14 +1,9 @@
-//! Precomputed fields for tier_score / fast_path (filled once in `extract`).
+//! Precomputed fields for fast path and k-NN vectorization (filled once in `extract`).
 
 use super::RawPayload;
 
-pub const TREE_FEATURE_COUNT: usize = 21;
-
-const AMOUNT_VS_AVG_RATIO: f32 = 10.0;
-const RATIO_FRAUD_THRESHOLD: f32 = 0.06951915;
-
 #[derive(Clone, Copy, Debug)]
-pub struct TierCache {
+pub struct PayloadCache {
     pub mcc_u32: u32,
     pub merchant_known: bool,
     pub requested_valid: bool,
@@ -18,16 +13,9 @@ pub struct TierCache {
     pub last_present: bool,
     pub last_epoch_ok: bool,
     pub last_epoch: i64,
-    /// Precomputed ratio path result (0 or 5).
-    pub ratio_count: u8,
-    /// Gray requests that never touch the decision tree.
-    pub gray_ratio_only: bool,
-    /// Tree features ready (set by `complete_cache`).
-    pub tree_ready: bool,
-    pub tree_features: [f32; TREE_FEATURE_COUNT],
 }
 
-impl Default for TierCache {
+impl Default for PayloadCache {
     fn default() -> Self {
         Self {
             mcc_u32: u32::MAX,
@@ -39,19 +27,15 @@ impl Default for TierCache {
             last_present: false,
             last_epoch_ok: false,
             last_epoch: 0,
-            ratio_count: 0,
-            gray_ratio_only: false,
-            tree_ready: false,
-            tree_features: [0.0; TREE_FEATURE_COUNT],
         }
     }
 }
 
-pub fn fill(p: &RawPayload<'_>) -> TierCache {
-    let mut c = TierCache {
+pub fn fill(p: &RawPayload<'_>) -> PayloadCache {
+    let mut c = PayloadCache {
         mcc_u32: mcc4_u32(p.merchant_mcc),
         merchant_known: merchant_known(p),
-        ..TierCache::default()
+        ..PayloadCache::default()
     };
 
     if let Some(parsed) = parse_iso(p.requested_at) {
@@ -69,24 +53,7 @@ pub fn fill(p: &RawPayload<'_>) -> TierCache {
         }
     }
 
-    let safe_avg = p.customer_avg_amount.max(1.0);
-    let norm = clamp01((p.amount / safe_avg) / AMOUNT_VS_AVG_RATIO);
-    c.ratio_count = if norm > RATIO_FRAUD_THRESHOLD { 5 } else { 0 };
-    c.gray_ratio_only =
-        !c.requested_valid || (c.last_present && !c.last_epoch_ok);
-
     c
-}
-
-#[inline]
-fn clamp01(x: f32) -> f32 {
-    if x < 0.0 {
-        0.0
-    } else if x > 1.0 {
-        1.0
-    } else {
-        x
-    }
 }
 
 #[inline]

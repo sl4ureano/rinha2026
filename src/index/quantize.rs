@@ -1,7 +1,7 @@
 //! Quantização e layout do índice vetorial em disco (partições + KD-tree).
 
-pub const MAGIC: [u8; 8] = *b"FRAUDIDX";
-pub const VERSION: u32 = 4;
+pub const MAGIC: [u8; 8] = *b"FRAUDID2";
+pub const VERSION: u32 = 5;
 
 pub const VECTOR_DIM: usize = 14;
 pub const PACKED_DIMS: usize = 16; // padding to 32-byte alignment for bbox arrays
@@ -11,18 +11,10 @@ pub const LANES: usize = 8;
 
 pub const HEADER_SIZE: usize = 64;
 pub const PART_SIZE: usize = 76; // 4+4+4+32+32
-pub const NODE_SIZE: usize = 80; // 4+4+4+4+32+32
+pub const NODE_SIZE: usize = 84; // 4+4+4+4+1+3+32+32
 pub const BLOCK_BYTES: usize = VECTOR_DIM * LANES * 2; // 14*8*i16 = 224
 /// MCC risk lookup table size (mcc % MCC_TABLE_SIZE → i16 risk).
 pub const MCC_TABLE_SIZE: usize = 1024;
-
-pub const EARLY_DISTANCE_MILLI: i32 = 140;
-/// In i16-quantized space: ((SCALE * 140) / 1000)^2 = 1400^2 = 1_960_000.
-/// Squared L2 below this and we stop the whole search — top-5 are "very close".
-pub const EARLY_DISTANCE_LIMIT: i64 = {
-    let v = (QUANT_SCALE * EARLY_DISTANCE_MILLI / 1000) as i64;
-    v * v
-};
 
 pub type QueryVector = [i16; PACKED_DIMS];
 
@@ -52,11 +44,11 @@ mod header_tests {
     use super::*;
     #[test]
     fn header_size_64() {
-        assert_eq!(std::mem::size_of::<BlobHeader>(), 64);
+        assert_eq!(std::mem::size_of::<IndexHeader>(), 64);
     }
     #[test]
     fn magic_value() {
-        assert_eq!(MAGIC, *b"FRAUDIDX");
+        assert_eq!(MAGIC, *b"FRAUDID2");
     }
 }
 
@@ -337,10 +329,7 @@ mod helpers_tests {
         let hi: QueryVector = [200; PACKED_DIMS];
         // diff per dim = 100, squared = 10000, over 14 dims = 140000
         assert_eq!(lower_bound_vec(&q, &lo, &hi), 14 * 10000);
-        assert_eq!(
-            lower_bound_vec_cutoff(&q, &lo, &hi, i64::MAX),
-            14 * 10000
-        );
+        assert_eq!(lower_bound_vec_cutoff(&q, &lo, &hi, i64::MAX), 14 * 10000);
         assert!(lower_bound_vec_cutoff(&q, &lo, &hi, 50000) >= 50000);
     }
 }

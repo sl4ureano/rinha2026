@@ -7,14 +7,11 @@
 #   api2 → CPU 1  (mesmo núcleo, HT — ambos APIs nos cores rápidos)
 #   lb   → CPU 2,3 (outro núcleo físico, só accept+fd-pass)
 #
-# Quota total: 0.45 + 0.45 + 0.10 = 1.00 CPU | 169+169+8+4 (tmpfs) = 350 MB
+# Quota total: 0.40 + 0.40 + 0.20 = 1.00 CPU | 151+151+48+4 (tmpfs) = 354 MB
 
 x-api: &api-common
   image: ghcr.io/sl4ureano/rinha2026:super
   pull_policy: always
-  environment:
-    - FD_PASS=1
-    - PORT=8080
   healthcheck:
     test: ["CMD", "/app/healthcheck"]
     interval: 1s
@@ -30,42 +27,29 @@ x-api: &api-common
   deploy:
     resources:
       limits:
-        cpus: "0.45"
-        memory: 169M
+        cpus: "0.40"
+        memory: 151M
   logging:
     driver: none
 
 services:
   api1:
     <<: *api-common
+    command: ["./server", "/tmp/sockets/api1.sock"]
     cpuset: "0"
     network_mode: "none"
-    environment:
-      - FD_PASS=1
-      - CTRL_SOCK=/tmp/sockets/api1.sock
-      - PORT=8080
-      - EPOLL_BUSY_POLL=1
 
   api2:
     <<: *api-common
+    command: ["./server", "/tmp/sockets/api2.sock"]
     cpuset: "1"
     network_mode: "none"
-    environment:
-      - FD_PASS=1
-      - CTRL_SOCK=/tmp/sockets/api2.sock
-      - PORT=8080
-      - EPOLL_BUSY_POLL=1
 
   lb:
     image: ghcr.io/sl4ureano/rinha2026:super
     pull_policy: always
     cpuset: "2,3"
     command: ["./lb"]
-    environment:
-      - LB_PORT=9999
-      - API1_SOCKET=/tmp/sockets/api1.sock
-      - API2_SOCKET=/tmp/sockets/api2.sock
-      - CHANNELS_PER_API=4
     ports:
       - "9999:9999"
     depends_on:
@@ -82,8 +66,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.10"
-          memory: 8M
+          cpus: "0.20"
+          memory: 48M
     logging:
       driver: none
     networks:

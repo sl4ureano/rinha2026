@@ -18,7 +18,7 @@ pub const STAGE_VALIDATION: usize = 7;
 pub const STAGE_PARSE_JSON: usize = 8;
 pub const STAGE_PAYLOAD_CACHE_FILL: usize = 9;
 pub const STAGE_FAST_PATH_LOOKUP: usize = 10;
-pub const STAGE_DECISION_TREE: usize = 11;
+pub const STAGE_KNN_SEARCH: usize = 11;
 pub const STAGE_RESPONSE_SELECT: usize = 12;
 pub const STAGE_SEND_SYSCALL: usize = 13;
 pub const STAGE_WRITE_COMPLETE: usize = 14;
@@ -91,7 +91,7 @@ const STAGE_NAMES: [&str; STAGE_COUNT] = [
     "parse_json",
     "payload_cache_fill",
     "fast_path_lookup",
-    "decision_tree",
+    "knn_search",
     "response_select_static",
     "send_syscall",
     "write_complete",
@@ -635,7 +635,10 @@ fn snapshot_loop() {
         let shutdown = wait_snapshot_interval(interval);
         emit_snapshot(&mut state, shutdown);
         if shutdown {
-            thread::sleep(Duration::from_millis(env_u64("PERF_FINAL_EXIT_DELAY_MS", 150)));
+            thread::sleep(Duration::from_millis(env_u64(
+                "PERF_FINAL_EXIT_DELAY_MS",
+                150,
+            )));
             std::process::exit(0);
         }
     }
@@ -741,14 +744,11 @@ fn build_snapshot(state: &mut SnapshotState) -> Value {
     let epoll_wait_timeouts = EPOLL_WAIT_TIMEOUTS.load(Ordering::Relaxed);
     let epoll_wait_errors = EPOLL_WAIT_ERRORS.load(Ordering::Relaxed);
     let epoll_wait_events = EPOLL_WAIT_EVENTS.load(Ordering::Relaxed);
-    let window_epoll_wait_calls =
-        epoll_wait_calls.saturating_sub(state.prev_epoll_wait_calls);
+    let window_epoll_wait_calls = epoll_wait_calls.saturating_sub(state.prev_epoll_wait_calls);
     let window_epoll_wait_timeouts =
         epoll_wait_timeouts.saturating_sub(state.prev_epoll_wait_timeouts);
-    let window_epoll_wait_errors =
-        epoll_wait_errors.saturating_sub(state.prev_epoll_wait_errors);
-    let window_epoll_wait_events =
-        epoll_wait_events.saturating_sub(state.prev_epoll_wait_events);
+    let window_epoll_wait_errors = epoll_wait_errors.saturating_sub(state.prev_epoll_wait_errors);
+    let window_epoll_wait_events = epoll_wait_events.saturating_sub(state.prev_epoll_wait_events);
     state.prev_epoll_wait_calls = epoll_wait_calls;
     state.prev_epoll_wait_timeouts = epoll_wait_timeouts;
     state.prev_epoll_wait_errors = epoll_wait_errors;
@@ -1012,8 +1012,14 @@ fn send_webhook_direct(body: &str) {
 fn install_shutdown_signal_handlers() {
     #[cfg(target_os = "linux")]
     unsafe {
-        libc::signal(libc::SIGTERM, shutdown_signal_handler as libc::sighandler_t);
-        libc::signal(libc::SIGINT, shutdown_signal_handler as libc::sighandler_t);
+        libc::signal(
+            libc::SIGTERM,
+            shutdown_signal_handler as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            shutdown_signal_handler as *const () as libc::sighandler_t,
+        );
     }
 }
 

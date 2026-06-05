@@ -20,8 +20,8 @@ pub struct RawPayload<'a> {
     /// ISO-8601 timestamp slice when `last_transaction` is present; None when null.
     pub last_timestamp: Option<&'a [u8]>,
     pub last_km: Option<f32>,
-    /// Filled by `extract` — avoids re-parsing in tier_score / fast_path.
-    pub cache: super::cache::TierCache,
+    /// Filled by `extract` — avoids re-parsing in fast path and k-NN vectorization.
+    pub cache: super::cache::PayloadCache,
 }
 
 pub fn extract(body: &[u8]) -> Option<RawPayload<'_>> {

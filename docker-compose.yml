@@ -1,19 +1,12 @@
 x-app-build: &app-build
   context: .
-  args:
-    RUST_IMAGE: ${RUST_IMAGE:-rustlang/rust:nightly}
-    BUILD_RUSTFLAGS: ${BUILD_RUSTFLAGS:--C target-cpu=haswell -Z tune-cpu=haswell}
 
 services:
   lb:
-    image: ${RINHA_IMAGE:-rinha2026:local}
+    image: rinha2026:local
     build: *app-build
     command: ["./lb"]
-    environment:
-      - LB_PORT=9999
-      - API1_SOCKET=/tmp/sockets/api1.sock
-      - API2_SOCKET=/tmp/sockets/api2.sock
-      - CHANNELS_PER_API=4
+    cpuset: "2,3"
     ports:
       - "9999:9999"
     depends_on:
@@ -30,21 +23,19 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.10"
-          memory: 8M
+          cpus: "0.20"
+          memory: 48M
     logging:
       driver: none
     networks:
       - rinha
 
   api1:
-    image: ${RINHA_IMAGE:-rinha2026:local}
+    image: rinha2026:local
     build: *app-build
+    command: ["./server", "/tmp/sockets/api1.sock"]
+    cpuset: "0"
     network_mode: "none"
-    environment:
-      - FD_PASS=1
-      - CTRL_SOCK=/tmp/sockets/api1.sock
-      - PORT=8080
     healthcheck:
       test: ["CMD", "/app/healthcheck"]
       interval: 1s
@@ -60,19 +51,17 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.45"
-          memory: 169M
+          cpus: "0.40"
+          memory: 151M
     logging:
       driver: none
 
   api2:
-    image: ${RINHA_IMAGE:-rinha2026:local}
+    image: rinha2026:local
     build: *app-build
+    command: ["./server", "/tmp/sockets/api2.sock"]
+    cpuset: "1"
     network_mode: "none"
-    environment:
-      - FD_PASS=1
-      - CTRL_SOCK=/tmp/sockets/api2.sock
-      - PORT=8080
     healthcheck:
       test: ["CMD", "/app/healthcheck"]
       interval: 1s
@@ -88,8 +77,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.45"
-          memory: 169M
+          cpus: "0.40"
+          memory: 151M
     logging:
       driver: none
 

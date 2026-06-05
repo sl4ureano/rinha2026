@@ -8,8 +8,7 @@
   --warn: #fbbf24;
   --danger: #fb7185;
   --ok: #4ade80;
-  --tree: #c084fc;
-  --ratio: #fb923c;
+  --knn: #38bdf8;
 }
 
 * {
@@ -228,22 +227,15 @@ button.ghost {
   text-align: center;
 }
 
-.metric-hero.legit {
+.metric-hero.fast {
   background: rgba(74, 222, 128, 0.15);
   color: var(--ok);
   box-shadow: 0 0 30px rgba(74, 222, 128, 0.2);
 }
-.metric-hero.fraud {
-  background: rgba(251, 113, 133, 0.15);
-  color: var(--danger);
-}
-.metric-hero.tree {
-  background: rgba(192, 132, 252, 0.15);
-  color: var(--tree);
-}
-.metric-hero.ratio {
-  background: rgba(251, 146, 60, 0.15);
-  color: var(--ratio);
+.metric-hero.knn {
+  background: rgba(56, 189, 248, 0.15);
+  color: var(--knn);
+  box-shadow: 0 0 30px rgba(56, 189, 248, 0.2);
 }
 
 .metrics-grid {
@@ -292,17 +284,6 @@ button.ghost {
 }
 .check-item.fail .dot {
   background: #334155;
-}
-
-.tree-walk {
-  max-height: 140px;
-  overflow: auto;
-  font-family: "JetBrains Mono", monospace;
-  font-size: 0.62rem;
-  background: rgba(0, 0, 0, 0.3);
-  border-radius: 8px;
-  padding: 0.5rem;
-  margin-top: 0.35rem;
 }
 
 .hud.bottom {

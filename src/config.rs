@@ -1,65 +1,33 @@
-//! Runtime configuration from environment variables.
+//! Runtime configuration for the submission layout.
 
 use std::path::{Path, PathBuf};
 
-#[inline]
-fn env_trim(key: &str) -> Option<String> {
-    std::env::var(key).ok().map(|v| v.trim().to_string())
-}
-
-#[inline]
-fn env_trim_or(key: &str, default: &str) -> String {
-    env_trim(key).unwrap_or_else(|| default.to_string())
-}
+const INDEX_PATH: &str = "/app/data/index.bin";
+const HEALTH_PORT: u16 = 8080;
+const LB_PORT: u16 = 9999;
+const API1_SOCKET: &str = "/tmp/sockets/api1.sock";
+const API2_SOCKET: &str = "/tmp/sockets/api2.sock";
+const CHANNELS_PER_API: usize = 2;
 
 /// API process configuration (index path, listen mode, health port).
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub index_path: PathBuf,
-    /// When set, the API receives accepted TCP sockets from the LB via Unix SCM_RIGHTS.
-    pub ctrl_sock: Option<PathBuf>,
+    pub ctrl_sock: PathBuf,
     pub health_port: u16,
-    /// Direct TCP bind address when not using FD pass-through.
-    pub bind_addr: Option<std::net::SocketAddr>,
 }
 
 impl ServerConfig {
-    pub fn from_env() -> Self {
-        let index_path = env_trim("INDEX_PATH")
-            .or_else(|| env_trim("BLOB_PATH"))
+    pub fn from_args() -> Self {
+        let ctrl_sock = std::env::args_os()
+            .nth(1)
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/app/data/index.bin"));
-
-        let ctrl_sock = env_trim("CTRL_SOCK")
-            .map(PathBuf::from)
-            .or_else(|| env_trim("RINHA_FD_SOCK").map(PathBuf::from))
-            .or_else(|| {
-                let fd_pass = env_trim("FD_PASS")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false);
-                if fd_pass {
-                    env_trim("SOCKET_PATH").map(PathBuf::from)
-                } else {
-                    None
-                }
-            });
-
-        let health_port = env_trim_or("PORT", "8080")
-            .parse()
-            .unwrap_or(8080);
-
-        let bind_addr = if ctrl_sock.is_some() {
-            None
-        } else {
-            let bind_str = env_trim("BIND").unwrap_or_else(|| format!("0.0.0.0:{health_port}"));
-            Some(bind_str.parse().expect("BIND must be a valid socket address"))
-        };
+            .expect("server requires the control socket path as the first argument");
 
         Self {
-            index_path,
+            index_path: PathBuf::from(INDEX_PATH),
             ctrl_sock,
-            health_port,
-            bind_addr,
+            health_port: HEALTH_PORT,
         }
     }
 
@@ -76,34 +44,16 @@ pub struct LbConfig {
 }
 
 impl LbConfig {
-    pub fn from_env() -> Self {
-        let port: u16 = env_trim_or("LB_PORT", "9999")
-            .parse()
-            .expect("LB_PORT");
+    pub fn fixed() -> Self {
+        let mut upstreams = Vec::with_capacity(CHANNELS_PER_API * 2);
+        for _ in 0..CHANNELS_PER_API {
+            upstreams.push(API1_SOCKET.to_string());
+            upstreams.push(API2_SOCKET.to_string());
+        }
 
-        let upstreams = if let Some(csv) = env_trim("UPSTREAMS") {
-            csv.split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        } else {
-            let api1 = env_trim_or("API1_SOCKET", "/tmp/sockets/api1.sock");
-            let api2 = env_trim_or("API2_SOCKET", "/tmp/sockets/api2.sock");
-            let channels: usize = env_trim_or("CHANNELS_PER_API", "4")
-                .parse()
-                .unwrap_or(4)
-                .max(1)
-                .min(8);
-            let mut v = Vec::with_capacity(channels * 2);
-            for _ in 0..channels {
-                v.push(api1.clone());
-            }
-            for _ in 0..channels {
-                v.push(api2.clone());
-            }
-            v
-        };
-
-        Self { port, upstreams }
+        Self {
+            port: LB_PORT,
+            upstreams,
+        }
     }
 }

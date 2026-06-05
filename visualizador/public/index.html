@@ -20,7 +20,7 @@
         <span class="logo">⚡</span>
         <div>
           <h1>Rinha Flow</h1>
-          <p>POST /fraud-score em 3D — pipeline híbrido — tempo real</p>
+          <p>POST /fraud-score em 3D — gasto seguro + k-NN exato — tempo real</p>
         </div>
       </div>
       <div class="status-pills">
@@ -40,9 +40,8 @@
       <label for="examples">Exemplos</label>
       <select id="examples"></select>
       <p class="hint">
-        Com <code>docker compose up</code>, a API fica em <code>:9999</code>. O visualizador replica o
-        pipeline híbrido em JS: fast path (atalhos) → árvore (21 features) → ratio. O índice k-NN
-        (3M refs, 14 dims) fica como backup server-side.
+        Com <code>docker compose up</code>, a API fica em <code>:9999</code>. O visualizador mostra o
+        fluxo atual: gasto claramente seguro aprova no fast path; todo o resto consulta o k-NN exato.
       </p>
     </aside>
 
@@ -68,13 +67,12 @@
           <dd id="m-match">—</dd>
         </dl>
         <div id="checks-block"></div>
-        <div id="tree-block" class="hidden"></div>
       </div>
     </aside>
 
     <footer class="hud bottom">
       <span id="legend"></span>
-      <span class="credit">Rinha 2026 — fraud-detector hybrid (fast path + tree + k-NN backup)</span>
+      <span class="credit">Rinha 2026 — fraud-detector hybrid (gasto seguro + k-NN exato)</span>
     </footer>
 
     <script type="importmap">

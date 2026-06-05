@@ -9,5 +9,5 @@ mod json;
 #[cfg(feature = "knn-index")]
 pub use features::vectorize_payload;
 
-pub use cache::TierCache;
+pub use cache::PayloadCache;
 pub use json::{extract, RawPayload};

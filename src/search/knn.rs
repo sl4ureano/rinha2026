@@ -6,10 +6,6 @@
 //! query's distance to any vector in the subtree is `lower_bound_vec(query,
 //! min, max)`. When that lower bound is ≥ our current 5th-best, we skip the
 //! whole subtree.
-//!
-//! Early global termination: once `top[4].dist <= EARLY_DISTANCE_LIMIT`, we
-//! return immediately — the top-5 are already so close that no further
-//! probing could change the count of fraud labels.
 
 #![allow(clippy::needless_range_loop)]
 
@@ -18,11 +14,96 @@ use crate::index::QueryVector;
 
 #[cfg(target_arch = "x86_64")]
 use crate::index::{
-    lower_bound_vec_cutoff, partition_key, EARLY_DISTANCE_LIMIT, LANES, NODE_SIZE, PART_SIZE, TOP_K,
-    VECTOR_DIM,
+    lower_bound_vec_cutoff, partition_key, LANES, NODE_SIZE, PART_SIZE, TOP_K, VECTOR_DIM,
 };
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
+#[cfg(target_arch = "x86_64")]
+use std::mem::MaybeUninit;
+
+#[cfg(target_arch = "x86_64")]
+const DIM_PAIRS: usize = VECTOR_DIM / 2;
+#[cfg(target_arch = "x86_64")]
+const DEFER_CAP: usize = 4096;
+#[cfg(target_arch = "x86_64")]
+const LABEL_MASK_LEGIT: u8 = 1;
+#[cfg(target_arch = "x86_64")]
+const LABEL_MASK_FRAUD: u8 = 2;
+
+#[cfg(target_arch = "x86_64")]
+#[derive(Clone, Copy)]
+struct NodeVisit {
+    idx: i32,
+    bound: i64,
+}
+
+#[cfg(target_arch = "x86_64")]
+struct Search {
+    best_dists: [i64; TOP_K],
+    best_labels: [u8; TOP_K],
+    deferred: [MaybeUninit<NodeVisit>; DEFER_CAP],
+    deferred_len: usize,
+    chromatic: bool,
+    chrom_initial_sum: u8,
+    chrom_needed_mask: u8,
+}
+
+#[cfg(target_arch = "x86_64")]
+impl Search {
+    fn new() -> Self {
+        Self {
+            best_dists: [i64::MAX; TOP_K],
+            best_labels: [0u8; TOP_K],
+            deferred: [MaybeUninit::uninit(); DEFER_CAP],
+            deferred_len: 0,
+            chromatic: false,
+            chrom_initial_sum: 0,
+            chrom_needed_mask: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn top_complete(&self) -> bool {
+        self.best_dists[TOP_K - 1] != i64::MAX
+    }
+
+    #[inline(always)]
+    fn top_sum(&self) -> u8 {
+        sum_labels(&self.best_labels)
+    }
+
+    #[inline(always)]
+    fn maybe_activate_chromatic(&mut self) {
+        if self.chromatic || !self.top_complete() {
+            return;
+        }
+        let sum = self.top_sum();
+        if sum == 0 {
+            self.chromatic = true;
+            self.chrom_initial_sum = 0;
+            self.chrom_needed_mask = LABEL_MASK_FRAUD;
+        } else if sum == TOP_K as u8 {
+            self.chromatic = true;
+            self.chrom_initial_sum = TOP_K as u8;
+            self.chrom_needed_mask = LABEL_MASK_LEGIT;
+        }
+    }
+
+    #[inline(always)]
+    fn should_defer(&mut self, label_mask: u8) -> bool {
+        self.maybe_activate_chromatic();
+        self.chromatic
+            && self.top_sum() == self.chrom_initial_sum
+            && (label_mask & self.chrom_needed_mask) == 0
+            && self.deferred_len < DEFER_CAP
+    }
+
+    #[inline(always)]
+    fn push_deferred(&mut self, idx: i32, bound: i64) {
+        self.deferred[self.deferred_len].write(NodeVisit { idx, bound });
+        self.deferred_len += 1;
+    }
+}
 
 /// Top-5 fraud labels in the true nearest neighbors. Returns count `0..=5`.
 #[inline]
@@ -47,12 +128,12 @@ pub fn fraud_count(index: &Index, query: &QueryVector) -> u8 {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn fraud_count_avx2(index: &Index, query: &QueryVector) -> u8 {
-    let mut best_dists = [i64::MAX; TOP_K];
-    let mut best_labels = [0u8; TOP_K];
+    let mut s = Search::new();
 
-    let mut q_broadcast = [_mm256_setzero_si256(); VECTOR_DIM];
-    for d in 0..VECTOR_DIM {
-        q_broadcast[d] = _mm256_set1_epi32(query[d] as i32);
+    let mut q_pairs = [_mm256_setzero_si256(); DIM_PAIRS];
+    for p in 0..DIM_PAIRS {
+        let packed = (query[p * 2] as u16 as u32) | ((query[p * 2 + 1] as u16 as u32) << 16);
+        q_pairs[p] = _mm256_set1_epi32(packed as i32);
     }
 
     let key = partition_key(query);
@@ -60,17 +141,7 @@ unsafe fn fraud_count_avx2(index: &Index, query: &QueryVector) -> u8 {
 
     if primary >= 0 {
         let root = read_partition_root(index, primary as usize);
-        if search_node(
-            index,
-            root,
-            0,
-            query,
-            &q_broadcast,
-            &mut best_dists,
-            &mut best_labels,
-        ) {
-            return sum_labels(&best_labels);
-        }
+        search_node(index, root, 0, query, &q_pairs, &mut s, true);
     }
 
     // Sweep other partitions in lower-bound order, skipping any whose bound
@@ -78,18 +149,14 @@ unsafe fn fraud_count_avx2(index: &Index, query: &QueryVector) -> u8 {
     let part_count = index.part_count() as i32;
     let mut buf: [(i32, i64); 256] = [(0, 0); 256];
     let mut n = 0usize;
-    let mut cutoff = best_dists[TOP_K - 1];
+    let mut cutoff = s.best_dists[TOP_K - 1];
     for i in 0..part_count {
         if i == primary {
             continue;
         }
         let idx = i as usize;
         if i + 1 < part_count {
-            let next = if i + 1 == primary {
-                i + 2
-            } else {
-                i + 1
-            };
+            let next = if i + 1 == primary { i + 2 } else { i + 1 };
             if next < part_count {
                 prefetch_partition_bbox(index, next as usize);
             }
@@ -108,25 +175,33 @@ unsafe fn fraud_count_avx2(index: &Index, query: &QueryVector) -> u8 {
     sort_probes_by_lb(&mut buf[..n]);
 
     for &(part_idx, lb) in buf[..n].iter() {
-        cutoff = best_dists[TOP_K - 1];
+        cutoff = s.best_dists[TOP_K - 1];
         if lb >= cutoff {
             break;
         }
         let root = read_partition_root(index, part_idx as usize);
-        if search_node(
-            index,
-            root,
-            lb,
-            query,
-            &q_broadcast,
-            &mut best_dists,
-            &mut best_labels,
-        ) {
-            break;
+        search_node(index, root, lb, query, &q_pairs, &mut s, true);
+    }
+
+    if s.chromatic && s.top_sum() != s.chrom_initial_sum {
+        let deferred_len = s.deferred_len;
+        s.chromatic = false;
+        s.deferred_len = 0;
+        for i in 0..deferred_len {
+            let visit = s.deferred[i].assume_init();
+            search_node(
+                index,
+                visit.idx,
+                visit.bound,
+                query,
+                &q_pairs,
+                &mut s,
+                false,
+            );
         }
     }
 
-    sum_labels(&best_labels)
+    s.top_sum()
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -136,12 +211,12 @@ unsafe fn search_node(
     root: i32,
     root_bound: i64,
     query: &QueryVector,
-    q_broadcast: &[__m256i; VECTOR_DIM],
-    best_dists: &mut [i64; TOP_K],
-    best_labels: &mut [u8; TOP_K],
-) -> bool {
+    q_pairs: &[__m256i; DIM_PAIRS],
+    s: &mut Search,
+    allow_chromatic: bool,
+) {
     if root < 0 || root as u32 >= index.node_count() {
-        return false;
+        return;
     }
 
     let mut stack_node = [0i32; 128];
@@ -149,23 +224,34 @@ unsafe fn search_node(
     let mut sp: usize = 0;
     let mut current = root;
     let mut current_bound = root_bound;
-    let mut cutoff = best_dists[TOP_K - 1];
+    let mut cutoff = s.best_dists[TOP_K - 1];
 
     loop {
         if current_bound < cutoff {
+            if allow_chromatic {
+                let label_mask = read_node_label_mask(index, current as usize);
+                if s.should_defer(label_mask) {
+                    s.push_deferred(current, current_bound);
+                    if sp == 0 {
+                        break;
+                    }
+                    sp -= 1;
+                    current = stack_node[sp];
+                    current_bound = stack_bound[sp];
+                    continue;
+                }
+            }
             let (left, right, start, len) = read_node_split(index, current as usize);
             if left < 0 {
-                if scan_leaf(
+                scan_leaf(
                     index,
                     start,
                     len,
-                    q_broadcast,
-                    best_dists,
-                    best_labels,
-                ) {
-                    return true;
-                }
-                cutoff = best_dists[TOP_K - 1];
+                    q_pairs,
+                    &mut s.best_dists,
+                    &mut s.best_labels,
+                );
+                cutoff = s.best_dists[TOP_K - 1];
             } else {
                 prefetch_node_bounds(index, left as usize);
                 prefetch_node_bounds(index, right as usize);
@@ -186,7 +272,7 @@ unsafe fn search_node(
                 }
                 current = near;
                 current_bound = near_b;
-                cutoff = best_dists[TOP_K - 1];
+                cutoff = s.best_dists[TOP_K - 1];
                 continue;
             }
         }
@@ -198,13 +284,6 @@ unsafe fn search_node(
         current = stack_node[sp];
         current_bound = stack_bound[sp];
     }
-    early_done(best_dists)
-}
-
-#[cfg(target_arch = "x86_64")]
-#[inline(always)]
-fn early_done(best: &[i64; TOP_K]) -> bool {
-    best[TOP_K - 1] <= EARLY_DISTANCE_LIMIT
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -213,10 +292,10 @@ unsafe fn scan_leaf(
     index: &Index,
     start_block: i32,
     len: i32,
-    q_broadcast: &[__m256i; VECTOR_DIM],
+    q_pairs: &[__m256i; DIM_PAIRS],
     best_dists: &mut [i64; TOP_K],
     best_labels: &mut [u8; TOP_K],
-) -> bool {
+) {
     let blocks = (len as usize).div_ceil(LANES);
     let labels_ptr = index.labels_ptr();
     let vectors_ptr = index.vectors_ptr();
@@ -230,15 +309,12 @@ unsafe fn scan_leaf(
                 vectors_ptr.add(next * VECTOR_DIM * LANES) as *const i8,
                 _MM_HINT_T0,
             );
-            _mm_prefetch(
-                labels_ptr.add(next * LANES) as *const i8,
-                _MM_HINT_T0,
-            );
+            _mm_prefetch(labels_ptr.add(next * LANES) as *const i8, _MM_HINT_T0);
         }
         let labels_base = block_idx * LANES;
         let block_off_i16 = block_idx * VECTOR_DIM * LANES;
 
-        let dists = distance_block8(vectors_ptr, block_off_i16, q_broadcast);
+        let dists = distance_block8(vectors_ptr, block_off_i16, q_pairs);
 
         let lane_count = (total_len - b * LANES).min(LANES);
         let mut cutoff = best_dists[TOP_K - 1];
@@ -248,13 +324,9 @@ unsafe fn scan_leaf(
                 let label = *labels_ptr.add(labels_base + lane);
                 insert_best(d, label, best_dists, best_labels);
                 cutoff = best_dists[TOP_K - 1];
-                if cutoff <= EARLY_DISTANCE_LIMIT {
-                    return true;
-                }
             }
         }
     }
-    false
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -262,24 +334,24 @@ unsafe fn scan_leaf(
 unsafe fn distance_block8(
     vectors: *const i16,
     block_off_i16: usize,
-    q: &[__m256i; VECTOR_DIM],
+    q_pairs: &[__m256i; DIM_PAIRS],
 ) -> [i64; LANES] {
     let mut acc_lo = _mm256_setzero_si256();
     let mut acc_hi = _mm256_setzero_si256();
     let base = vectors.add(block_off_i16);
-    for d in 0..VECTOR_DIM {
-        if d + 1 < VECTOR_DIM {
-            _mm_prefetch(
-                base.add((d + 1) * LANES) as *const i8,
-                _MM_HINT_T0,
-            );
+    for p in 0..DIM_PAIRS {
+        if p + 1 < DIM_PAIRS {
+            _mm_prefetch(base.add((p + 1) * 2 * LANES) as *const i8, _MM_HINT_T0);
         }
-        let packed = _mm_loadu_si128(base.add(d * LANES) as *const __m128i);
-        let values = _mm256_cvtepi16_epi32(packed);
-        let diff = _mm256_sub_epi32(values, q[d]);
-        let sq = _mm256_mullo_epi32(diff, diff);
-        let sq_lo = _mm256_castsi256_si128(sq);
-        let sq_hi = _mm256_extracti128_si256(sq, 1);
+        let even = _mm_loadu_si128(base.add(p * 2 * LANES) as *const __m128i);
+        let odd = _mm_loadu_si128(base.add((p * 2 + 1) * LANES) as *const __m128i);
+        let lo = _mm_unpacklo_epi16(even, odd);
+        let hi = _mm_unpackhi_epi16(even, odd);
+        let values = _mm256_set_m128i(hi, lo);
+        let diff = _mm256_sub_epi16(values, q_pairs[p]);
+        let pair_sums = _mm256_madd_epi16(diff, diff);
+        let sq_lo = _mm256_castsi256_si128(pair_sums);
+        let sq_hi = _mm256_extracti128_si256(pair_sums, 1);
         acc_lo = _mm256_add_epi64(acc_lo, _mm256_cvtepi32_epi64(sq_lo));
         acc_hi = _mm256_add_epi64(acc_hi, _mm256_cvtepi32_epi64(sq_hi));
     }
@@ -367,7 +439,7 @@ unsafe fn prefetch_partition_bbox(index: &Index, idx: usize) {
 #[cfg(target_arch = "x86_64")]
 #[inline]
 unsafe fn prefetch_node_bounds(index: &Index, idx: usize) {
-    let p = index.nodes_ptr().add(idx * NODE_SIZE + 16);
+    let p = index.nodes_ptr().add(idx * NODE_SIZE + 20);
     _mm_prefetch(p as *const i8, _MM_HINT_T0);
 }
 
@@ -405,9 +477,15 @@ fn read_node_split(index: &Index, idx: usize) -> (i32, i32, i32, i32) {
 
 #[cfg(target_arch = "x86_64")]
 #[inline]
+fn read_node_label_mask(index: &Index, idx: usize) -> u8 {
+    unsafe { *index.nodes_ptr().add(idx * NODE_SIZE + 16) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
 fn read_node_bounds(index: &Index, idx: usize) -> (QueryVector, QueryVector) {
     unsafe {
-        let p = index.nodes_ptr().add(idx * NODE_SIZE + 16);
+        let p = index.nodes_ptr().add(idx * NODE_SIZE + 20);
         (read_qv(p), read_qv(p.add(32)))
     }
 }

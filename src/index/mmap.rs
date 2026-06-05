@@ -1,16 +1,14 @@
-use anyhow::{anyhow, Context, Result};
-use memmap2::Mmap;
 use super::{
     IndexHeader, BLOCK_BYTES, HEADER_SIZE, LANES, MAGIC, MCC_TABLE_SIZE, NODE_SIZE, PACKED_DIMS,
     PART_SIZE, QUANT_SCALE, VECTOR_DIM,
 };
+use anyhow::{anyhow, Context, Result};
+use memmap2::Mmap;
 use std::fs::File;
 use std::path::Path;
 
 #[cfg(target_os = "linux")]
 const MADV_HUGEPAGE: libc::c_int = 14;
-#[cfg(target_os = "linux")]
-const MADV_DONTNEED: libc::c_int = 4;
 #[cfg(target_os = "linux")]
 const MADV_RANDOM: libc::c_int = 1;
 
@@ -37,7 +35,12 @@ impl Index {
     /// where fraud scoring uses heuristics instead of k-NN search.
     pub fn empty() -> Self {
         use memmap2::MmapOptions;
-        let mmap = MmapOptions::new().len(1).map_anon().unwrap().make_read_only().unwrap();
+        let mmap = MmapOptions::new()
+            .len(1)
+            .map_anon()
+            .unwrap()
+            .make_read_only()
+            .unwrap();
         Self {
             base: mmap.as_ptr(),
             _mmap: mmap,
@@ -134,12 +137,12 @@ impl Index {
     fn advise(&self) {
         unsafe {
             libc::madvise(self.base as *mut _, self.len, MADV_HUGEPAGE);
-            // Hot path uses tier_score only — drop ~90 MB vectors+labels from CPU cache.
-            let cold_start = self.vectors_off;
-            let cold_len = self.mcc_table_off - cold_start;
-            if cold_len > 0 {
-                libc::madvise(self.base.add(cold_start) as *mut _, cold_len, MADV_DONTNEED);
-            }
+            let index_len = self.mcc_table_off - self.nodes_off;
+            libc::madvise(
+                self.base.add(self.nodes_off) as *mut _,
+                index_len,
+                MADV_RANDOM,
+            );
             let mcc_len = MCC_TABLE_SIZE * 2;
             libc::madvise(
                 self.base.add(self.mcc_table_off) as *mut _,
@@ -179,7 +182,8 @@ impl Index {
     }
 
     /// Pointer to the start of the nodes table. Each entry is `NODE_SIZE`:
-    /// left i32, right i32, start i32, len i32, min[16] i16, max[16] i16.
+    /// left i32, right i32, start i32, len i32, label_mask u8, pad[3],
+    /// min[16] i16, max[16] i16.
     #[inline]
     pub fn nodes_ptr(&self) -> *const u8 {
         unsafe { self.base.add(self.nodes_off) }

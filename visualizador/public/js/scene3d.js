@@ -11,10 +11,7 @@ import {
   buildServer,
   buildHttpPacket,
   buildJsonBraces,
-  buildCpuChip,
   buildShield,
-  buildAlert,
-  buildDecisionGraph,
   buildGauge,
   buildResponsePacket,
   buildDataPacket,
@@ -23,13 +20,11 @@ import {
 } from "./tech-models.js";
 
 export const PATH_COLORS = {
-  ObviousLegit: 0x4ade80,
-  ObviousFraud: 0xfb7185,
-  Tree: 0xc084fc,
-  Ratio: 0xfb923c,
+  SafeFast: 0x4ade80,
+  Knn: 0x38bdf8,
 };
 
-/** Infra à esquerda (z=0); tier_score em faixa lateral separada (z negativo) */
+/** Infra à esquerda (z=0); classificador em faixa lateral separada (z negativo) */
 export const LAYOUT_CENTER = new THREE.Vector3(4, 1.5, -1.5);
 export const SCORER_Z = -5.5;
 export const SCORER_STEP = 3.8;
@@ -43,12 +38,9 @@ export const ARCH = {
   api2: new THREE.Vector3(-3.5, 1.5, 3.5),
   http: new THREE.Vector3(-0.5, 1.5, 0),
   extract: new THREE.Vector3(2, 1.5, SCORER_Z),
-  tier: new THREE.Vector3(2 + SCORER_STEP, 1.5, SCORER_Z),
-  legit: new THREE.Vector3(2 + SCORER_STEP * 2, 1.5, SCORER_Z + BRANCH_Z),
-  fraud: new THREE.Vector3(2 + SCORER_STEP * 2, 1.5, SCORER_Z - BRANCH_Z),
-  tree: new THREE.Vector3(2 + SCORER_STEP * 3, 1.5, SCORER_Z),
-  ratio: new THREE.Vector3(2 + SCORER_STEP * 4, 1.5, SCORER_Z),
-  response: new THREE.Vector3(2 + SCORER_STEP * 5, 1.5, SCORER_Z),
+  safe: new THREE.Vector3(2 + SCORER_STEP, 1.5, SCORER_Z + BRANCH_Z),
+  knn: new THREE.Vector3(2 + SCORER_STEP, 1.5, SCORER_Z - BRANCH_Z),
+  response: new THREE.Vector3(2 + SCORER_STEP * 3, 1.5, SCORER_Z),
 };
 
 function makeLabel(text, accent = "#38bdf8") {
@@ -154,7 +146,7 @@ export function createScene(wrap) {
     client: addPoint(0x38bdf8, ARCH.client),
     lb: addPoint(0xfbbf24, ARCH.lb),
     api: addPoint(0x818cf8, new THREE.Vector3(-3.5, 1.5, 0)),
-    scorer: addPoint(0xc084fc, ARCH.tier),
+    scorer: addPoint(0x38bdf8, ARCH.extract),
   };
   function addPoint(color, pos) {
     const l = new THREE.PointLight(color, 2.1, 20, 1.5);
@@ -179,11 +171,8 @@ export function createScene(wrap) {
   register(createTechNode("api2", ARCH.api2, () => buildServer(0x8b5cf6), "API 2 — server", "#a78bfa"));
   register(createTechNode("http", ARCH.http, () => buildHttpPacket(0x3b82f6), "HTTP parse", "#60a5fa"));
   register(createTechNode("extract", ARCH.extract, () => buildJsonBraces(0x22d3ee), "JSON extract", "#22d3ee"));
-  register(createTechNode("tier", ARCH.tier, () => buildCpuChip(0xa855f7), "tier_score", "#c084fc"));
-  register(createTechNode("legit", ARCH.legit, () => buildShield(0x22c55e), "Gasto seguro?", "#4ade80"));
-  register(createTechNode("fraud", ARCH.fraud, () => buildAlert(0xef4444), "Gasto arriscado?", "#f87171"));
-  register(createTechNode("tree", ARCH.tree, () => buildDecisionGraph(0xa855f7), "Árvore de decisão", "#d8b4fe"));
-  register(createTechNode("ratio", ARCH.ratio, () => buildGauge(0xf97316), "Ratio fallback", "#fb923c"));
+  register(createTechNode("safe", ARCH.safe, () => buildShield(0x22c55e), "Gasto seguro?", "#4ade80"));
+  register(createTechNode("knn", ARCH.knn, () => buildGauge(0x38bdf8), "k-NN exato", "#38bdf8"));
   register(createTechNode("response", ARCH.response, () => buildResponsePacket(0x2dd4bf), "Resposta HTTP", "#5eead4"));
 
   // Luz pontual em cada nó (ilumina de baixo)
@@ -205,7 +194,7 @@ export function createScene(wrap) {
     blending: THREE.AdditiveBlending,
   });
 
-  /** Faixa de retorno — lado oposto ao tier_score (SCORER_Z < 0) */
+  /** Faixa de retorno — lado oposto ao classificador (SCORER_Z < 0) */
   const RETURN_LANE_Z = 6;
   const RETURN_LANE_Y = 1.12;
 
@@ -288,29 +277,22 @@ export function createScene(wrap) {
     return returnPathPoints(from, to);
   }
 
-  /** Após tier_score, só um ramo conforme o path (nunca legit + fraud na mesma animação) */
-  function routeAfterTier(path) {
-    switch (path) {
-      case "ObviousLegit":
-        return [ARCH.legit.clone(), ARCH.response.clone()];
-      case "ObviousFraud":
-        return [ARCH.fraud.clone(), ARCH.response.clone()];
-      case "Tree":
-        return [ARCH.tree.clone(), ARCH.response.clone()];
-      default:
-        return [ARCH.ratio.clone(), ARCH.response.clone()];
+  function routeAfterExtract(path) {
+    if (path === "SafeFast") {
+      return [ARCH.safe.clone(), ARCH.response.clone()];
     }
+    return [ARCH.knn.clone(), ARCH.response.clone()];
   }
 
   function buildAnimationPoints(flowSteps, path) {
-    const tierIdx = flowSteps.findIndex((s) => s.id === "tier");
+    const extractIdx = flowSteps.findIndex((s) => s.id === "extract");
     const points = [];
-    const ingress = tierIdx >= 0 ? flowSteps.slice(0, tierIdx + 1) : flowSteps;
+    const ingress = extractIdx >= 0 ? flowSteps.slice(0, extractIdx + 1) : flowSteps;
     for (const step of ingress) {
       if (step.id === "client_out") continue;
       points.push(resolveStepPos(step));
     }
-    if (tierIdx >= 0) points.push(...routeAfterTier(path));
+    if (extractIdx >= 0) points.push(...routeAfterExtract(path));
     if (flowSteps.some((s) => s.id === "client_out")) {
       points.push(...returnWaypoints(ARCH.response, ARCH.client));
     }
@@ -325,10 +307,10 @@ export function createScene(wrap) {
     [ARCH.api1, ARCH.http, 0.18],
     [ARCH.api2, ARCH.http, 0.18],
     [ARCH.http, ARCH.extract, 0.2],
-    [ARCH.extract, ARCH.tier, 0.06],
-    [ARCH.tier, ARCH.tree, 0.08],
-    [ARCH.tree, ARCH.ratio, 0.06],
-    [ARCH.ratio, ARCH.response, 0.04],
+    [ARCH.extract, ARCH.safe, 0.08],
+    [ARCH.extract, ARCH.knn, 0.08],
+    [ARCH.safe, ARCH.response, 0.04],
+    [ARCH.knn, ARCH.response, 0.04],
   ];
 
   const shortcutCore = new THREE.MeshBasicMaterial({
@@ -362,11 +344,10 @@ export function createScene(wrap) {
     return group;
   }
 
-  const shortcutLegit = makeShortcutCable(ARCH.legit, ARCH.response);
-  const shortcutFraud = makeShortcutCable(ARCH.fraud, ARCH.response);
+  const shortcutSafe = makeShortcutCable(ARCH.safe, ARCH.response);
 
   const branchCableMat = new THREE.MeshBasicMaterial({
-    color: 0xc084fc,
+    color: 0x38bdf8,
     transparent: true,
     opacity: 0.55,
   });
@@ -377,15 +358,11 @@ export function createScene(wrap) {
       scene.remove(activeBranchCable);
       activeBranchCable = null;
     }
-    shortcutLegit.visible = path === "ObviousLegit";
-    shortcutFraud.visible = path === "ObviousFraud";
+    shortcutSafe.visible = path === "SafeFast";
 
-    let from;
-    if (path === "ObviousLegit") from = ARCH.legit;
-    else if (path === "ObviousFraud") from = ARCH.fraud;
-    else return;
+    const from = path === "SafeFast" ? ARCH.safe : ARCH.knn;
 
-    const pathCurve = pathFromPoints([ARCH.tier.clone(), from.clone()]);
+    const pathCurve = pathFromPoints([ARCH.extract.clone(), from.clone()]);
     activeBranchCable = new THREE.Mesh(
       new THREE.TubeGeometry(pathCurve, 24, 0.03, 5, false),
       branchCableMat,
@@ -427,26 +404,22 @@ export function createScene(wrap) {
     if (id === "api1" || id === "api2") return (ARCH[id] ?? ARCH.api1).clone();
     if (id === "http") return ARCH.http.clone();
     if (id === "extract") return ARCH.extract.clone();
-    if (id === "tier") return ARCH.tier.clone();
-    if (id.startsWith("legit")) return ARCH.legit.clone();
-    if (id.startsWith("fraud")) return ARCH.fraud.clone();
-    if (id === "tree" || id.startsWith("tree")) return ARCH.tree.clone();
-    if (id === "ratio") return ARCH.ratio.clone();
+    if (id === "safe" || id === "approved") return ARCH.safe.clone();
+    if (id === "knn") return ARCH.knn.clone();
     if (id === "response") return ARCH.response.clone();
     return ARCH.extract.clone();
   }
 
-  const scorerBranches = new Set(["legit", "fraud", "tree", "ratio"]);
+  const scorerBranches = new Set(["safe", "knn"]);
 
-  function highlightPath(flowSteps, pathColor, tierPath) {
+  function highlightPath(flowSteps, pathColor, path) {
     const activeIds = new Set(flowSteps.map((s) => s.id));
-    if (tierPath === "ObviousLegit") activeIds.delete("fraud");
-    if (tierPath === "ObviousFraud") activeIds.delete("legit");
-    if (tierPath === "Tree" || tierPath === "Ratio") {
-      activeIds.delete("legit");
-      activeIds.delete("fraud");
+    if (path === "SafeFast") {
+      activeIds.delete("knn");
+    } else {
+      activeIds.delete("safe");
     }
-    setBranchCables(tierPath);
+    setBranchCables(path);
     const c = new THREE.Color(pathColor);
     for (const group of nodeGroups) {
       const id = group.userData.id;
@@ -483,8 +456,7 @@ export function createScene(wrap) {
   }
 
   function resetHighlights() {
-    shortcutLegit.visible = false;
-    shortcutFraud.visible = false;
+    shortcutSafe.visible = false;
     if (activeBranchCable) {
       scene.remove(activeBranchCable);
       activeBranchCable = null;

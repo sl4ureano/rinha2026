@@ -1,4 +1,4 @@
-//! Fraud detection API for Rinha 2026 — tier scorer + optional k-NN index tooling.
+//! Fraud detection API for Rinha 2026 — fast path conservador + k-NN exato.
 
 pub mod config;
 pub mod http;

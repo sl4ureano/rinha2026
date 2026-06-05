@@ -2,8 +2,7 @@ import http from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, extname } from 'node:path';
-import { loadDecisionTree } from './lib/tree-loader.mjs';
-import { traceRequest } from './lib/tier-engine.mjs';
+import { traceRequest } from './lib/hybrid-engine.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC = join(__dirname, 'public');
@@ -12,7 +11,6 @@ const EXAMPLES = join(__dirname, '..', 'resources', 'example-payloads.json');
 const PORT = Number(process.env.VIZ_PORT || 3333);
 const FRAUD_API = process.env.FRAUD_API_URL || 'http://127.0.0.1:9999';
 
-const treeNodes = loadDecisionTree();
 let rr = 0;
 
 /** @type {Set<import('node:http').ServerResponse>} */
@@ -115,9 +113,8 @@ const server = http.createServer(async (req, res) => {
       JSON.stringify({
         ok: true,
         fraudApi: FRAUD_API,
-        treeNodes: treeNodes.length,
         mode: 'hybrid',
-        pipeline: 'fast_path → decision_tree → ratio (k-NN backup)',
+        pipeline: 'gasto seguro → fast path; demais gastos → k-NN exato',
       })
     );
     return;
@@ -133,7 +130,6 @@ const server = http.createServer(async (req, res) => {
       `data: ${JSON.stringify({
         type: 'hello',
         fraudApi: FRAUD_API,
-        treeNodes: treeNodes.length,
         mode: 'hybrid',
       })}\n\n`
     );
@@ -152,8 +148,8 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await readJson(req);
       const api = rr++ % 2 === 0 ? 'api1' : 'api2';
-      const trace = traceRequest(body, treeNodes, { api });
       const proxy = await proxyFraudScore(body);
+      const trace = traceRequest(body, { api, apiResponse: proxy.body });
       const event = {
         type: 'flow',
         at: Date.now(),
@@ -179,7 +175,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await readJson(req);
       const api = rr++ % 2 === 0 ? 'api1' : 'api2';
-      const trace = traceRequest(body, treeNodes, { api });
+      const trace = traceRequest(body, { api });
       const event = {
         type: 'flow',
         at: Date.now(),
@@ -207,11 +203,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(
-    `\n  🎮 Rinha Flow Visualizador (híbrido: fast path + árvore + k-NN backup)`
-  );
+  console.log(`\n  Rinha Flow Visualizador (gasto seguro + k-NN exato)`);
   console.log(`  → http://localhost:${PORT}`);
   console.log(`  → API fraude: ${FRAUD_API}`);
-  console.log(`  → Árvore: ${treeNodes.length} nós`);
-  console.log(`  → k-NN index: backup em memória (server-side, AVX2)\n`);
+  console.log(`  → k-NN index: memoria mapeada server-side, AVX2\n`);
 });

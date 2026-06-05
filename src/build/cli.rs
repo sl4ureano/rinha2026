@@ -13,12 +13,11 @@ use crate::index::{quantize_value, MCC_TABLE_SIZE};
 pub fn run() {
     let args: Vec<String> = env::args().collect();
     let resources_dir = PathBuf::from(args.get(1).map(|s| s.as_str()).unwrap_or("resources"));
-    let out_path = PathBuf::from(
-        args.get(2)
-            .map(|s| s.as_str())
-            .unwrap_or("data/index.bin"),
-    );
-    let leaf_size: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_LEAF_SIZE);
+    let out_path = PathBuf::from(args.get(2).map(|s| s.as_str()).unwrap_or("data/index.bin"));
+    let leaf_size: usize = args
+        .get(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_LEAF_SIZE);
 
     eprintln!("loading mcc risk from {}", resources_dir.display());
     let mcc_risk = load_mcc_risk(&resources_dir.join("mcc_risk.json"))

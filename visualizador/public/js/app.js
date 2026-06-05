@@ -1,10 +1,8 @@
 import { createScene, PATH_COLORS } from './scene3d.js';
 
 const PATH_LABELS = {
-  ObviousLegit: 'Gasto seguro — atalho',
-  ObviousFraud: 'Gasto arriscado — atalho',
-  Tree: 'Árvore de decisão',
-  Ratio: 'Fallback ratio',
+  SafeFast: 'Gasto seguro — fast path',
+  Knn: 'Gasto nao seguro — k-NN exato',
 };
 
 const wrap = document.getElementById('canvas-wrap');
@@ -42,7 +40,7 @@ function renderMetrics(event) {
   const badge = $('path-badge');
   badge.textContent = PATH_LABELS[trace.path] ?? trace.path;
   badge.className = `metric-hero ${trace.path
-    .replace('Obvious', '')
+    .replace('Safe', '')
     .toLowerCase()}`;
 
   $('m-api').textContent = trace.api;
@@ -60,15 +58,9 @@ function renderMetrics(event) {
 
   const checks = $('checks-block');
   checks.innerHTML = '';
-  const checkSections =
-    trace.path === 'ObviousLegit'
-      ? [['Gasto seguro', trace.checks.obviousLegit]]
-      : trace.path === 'ObviousFraud'
-      ? [['Gasto arriscado', trace.checks.obviousFraud]]
-      : [
-          ['Gasto seguro (não)', trace.checks.obviousLegit],
-          ['Gasto arriscado (não)', trace.checks.obviousFraud],
-        ];
+  const checkSections = [
+    [trace.path === 'SafeFast' ? 'Gasto seguro' : 'Gasto seguro (nao)', trace.checks.safeSpend],
+  ];
   for (const [name, block] of checkSections) {
     const h = document.createElement('div');
     h.className = 'check-list';
@@ -80,24 +72,6 @@ function renderMetrics(event) {
       h.appendChild(row);
     }
     checks.appendChild(h);
-  }
-
-  const treeBlock = $('tree-block');
-  if (trace.tree?.walk?.length) {
-    treeBlock.classList.remove('hidden');
-    treeBlock.innerHTML = `<h3 style="font-size:0.75rem;color:var(--muted)">Árvore (${
-      trace.tree.walk.length
-    } passos)</h3><div class="tree-walk">${trace.tree.walk
-      .map((w) =>
-        w.leaf
-          ? `→ folha: ${w.fraud ? 'FRAUDE' : 'OK'}`
-          : `[${w.depth}] ${w.featureLabel}: ${w.value.toFixed(4)} ${
-              w.branch === 'left' ? '≤' : '>'
-            } ${w.threshold.toFixed(4)}`
-      )
-      .join('\n')}</div>`;
-  } else {
-    treeBlock.classList.add('hidden');
   }
 }
 
@@ -154,7 +128,7 @@ async function checkApi() {
   try {
     const h = await fetch('/api/health');
     const j = await h.json();
-    pill.textContent = `API: ${j.fraudApi} (${j.mode ?? 'tier'})`;
+    pill.textContent = `API: ${j.fraudApi} (${j.mode ?? 'hybrid'})`;
     pill.className = 'pill ok';
   } catch {
     pill.textContent = 'API: erro';

@@ -84,7 +84,7 @@ pub fn run(cfg: LbConfig) {
         cfg.port, BACKLOG, upstream_count
     );
 
-    let mut rr_next: u32 = 0;
+    let mut rr_next: usize = 0;
 
     loop {
         let mut accepted = 0usize;
@@ -113,33 +113,20 @@ pub fn run(cfg: LbConfig) {
             perf::record_stage(perf::STAGE_LB_ACCEPT, accept_start);
             perf::lb_accepted();
 
-            // TCP tuning no LB: elimina setsockopt do hot path do API
-            unsafe {
-                let one: libc::c_int = 1;
-                libc::setsockopt(
-                    client,
-                    libc::IPPROTO_TCP,
-                    libc::TCP_NODELAY,
-                    &one as *const _ as *const _,
-                    4,
-                );
-                libc::setsockopt(
-                    client,
-                    libc::IPPROTO_TCP,
-                    libc::TCP_QUICKACK,
-                    &one as *const _ as *const _,
-                    4,
-                );
+            let first = rr_next;
+            rr_next += 1;
+            if rr_next == upstream_count {
+                rr_next = 0;
             }
-
-            let first = (rr_next % upstream_count as u32) as usize;
-            rr_next = rr_next.wrapping_add(1);
 
             let mut handed_off = handoff(&mut upstreams[first], client);
             perf::lb_handoff(handed_off, first);
             if !handed_off {
                 for offset in 1..upstream_count {
-                    let idx = (first + offset) % upstream_count;
+                    let mut idx = first + offset;
+                    if idx >= upstream_count {
+                        idx -= upstream_count;
+                    }
                     handed_off = handoff(&mut upstreams[idx], client);
                     perf::lb_handoff(handed_off, idx);
                     if handed_off {
@@ -207,24 +194,6 @@ fn tcp_listen(port: u16) -> std::io::Result<RawFd> {
             libc::SOL_SOCKET,
             libc::SO_SNDBUF,
             &sndbuf as *const _ as *const _,
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        );
-        // TCP_DEFER_ACCEPT: kernel holds conn until data arrives → faster accept
-        let defer: libc::c_int = 1;
-        libc::setsockopt(
-            sock,
-            libc::IPPROTO_TCP,
-            libc::TCP_DEFER_ACCEPT,
-            &defer as *const _ as *const _,
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        );
-        // TCP_FASTOPEN: allow data in SYN for new connections
-        let tfo: libc::c_int = 5;
-        libc::setsockopt(
-            sock,
-            libc::IPPROTO_TCP,
-            libc::TCP_FASTOPEN,
-            &tfo as *const _ as *const _,
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         );
     }

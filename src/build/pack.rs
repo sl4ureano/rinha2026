@@ -16,7 +16,10 @@ use crate::index::{
     MCC_TABLE_SIZE, NODE_SIZE, PACKED_DIMS, PART_SIZE, QUANT_SCALE, VECTOR_DIM, VERSION,
 };
 
-pub const DEFAULT_LEAF_SIZE: usize = 128;
+pub const DEFAULT_LEAF_SIZE: usize = 80;
+
+const LABEL_MASK_LEGIT: u8 = 1;
+const LABEL_MASK_FRAUD: u8 = 2;
 
 pub struct BuildInputs<'a> {
     pub vectors: &'a [QueryVector],
@@ -32,6 +35,7 @@ struct BuildNode {
     right: i32,
     start: i32, // index into `blocks` in *Reference units* (not block units yet)
     len: i32,
+    label_mask: u8,
     min: QueryVector,
     max: QueryVector,
 }
@@ -131,7 +135,7 @@ pub fn build_index_with_leaf(input: &BuildInputs, leaf_size: usize) -> Vec<u8> {
         write_vec16(&mut out[off + 44..off + 76], &n.max);
     }
 
-    // Nodes
+    // Nodes: left, right, start, len, label_mask, padding[3], min[16], max[16]
     for (i, n) in nodes.iter().enumerate() {
         let off = nodes_off + i * NODE_SIZE;
         out[off..off + 4].copy_from_slice(&n.left.to_le_bytes());
@@ -145,8 +149,9 @@ pub fn build_index_with_leaf(input: &BuildInputs, leaf_size: usize) -> Vec<u8> {
         };
         out[off + 8..off + 12].copy_from_slice(&start_block.to_le_bytes());
         out[off + 12..off + 16].copy_from_slice(&n.len.to_le_bytes());
-        write_vec16(&mut out[off + 16..off + 48], &n.min);
-        write_vec16(&mut out[off + 48..off + 80], &n.max);
+        out[off + 16] = n.label_mask;
+        write_vec16(&mut out[off + 20..off + 52], &n.min);
+        write_vec16(&mut out[off + 52..off + 84], &n.max);
     }
 
     // Vectors: per block, dim 0 of LANES lanes, dim 1 of LANES lanes, ..., dim 13.
@@ -232,6 +237,7 @@ fn build_tree(
         right: -1,
         start: 0,
         len: indices.len() as i32,
+        label_mask: label_mask_for_indices(labels, indices),
         min: lo,
         max: hi,
     });
@@ -272,12 +278,29 @@ fn build_tree(
 
     let left_start = nodes[left].start;
     let total_len = nodes[left].len + nodes[right].len;
+    let label_mask = nodes[left].label_mask | nodes[right].label_mask;
     let node = &mut nodes[node_idx];
     node.left = left as i32;
     node.right = right as i32;
     node.start = left_start;
     node.len = total_len;
+    node.label_mask = label_mask;
     node_idx
+}
+
+fn label_mask_for_indices(labels: &[u8], indices: &[usize]) -> u8 {
+    let mut mask = 0u8;
+    for &i in indices {
+        mask |= if labels[i] == 0 {
+            LABEL_MASK_LEGIT
+        } else {
+            LABEL_MASK_FRAUD
+        };
+        if mask == LABEL_MASK_LEGIT | LABEL_MASK_FRAUD {
+            break;
+        }
+    }
+    mask
 }
 
 #[cfg(test)]

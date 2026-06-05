@@ -6,13 +6,12 @@
 use std::os::unix::io::RawFd;
 use std::path::Path;
 
-use std::sync::Arc;
-
 use crate::http::response;
 use crate::index::Index;
-use crate::ingest::extract;
+use crate::ingest::{extract, vectorize_payload};
 use crate::perf;
-use crate::search::{complete_cache, run_warmup, tier_gray_count, try_fast_fraud_count};
+use crate::search::{fraud_count, run_warmup, try_fast_fraud_count};
+use std::sync::Arc;
 
 use io_uring::{opcode, types, IoUring};
 
@@ -21,33 +20,19 @@ const MAX_FDS: usize = 8192;
 const MAX_EVENTS: i32 = 512;
 const BUF_CAP: usize = 8192;
 const CONN_POOL_CAP: usize = 256;
+const FD_PASS_SPIN_READ_ATTEMPTS: usize = 32;
 const CTRL_LISTEN_TOKEN: u64 = u64::MAX;
 const TCP_LISTEN_TOKEN: u64 = u64::MAX - 1;
 const HEALTH_LISTEN_TOKEN: u64 = u64::MAX - 2;
 const EPOLL_TIMEOUT_MS: i32 = 1;
 /// epoll_pwait2 timeout in microseconds (replaces 1ms epoll_wait).
-/// Kernel busy poll (EPIOCSPARAMS) handles low-latency polling without
-/// burning CPU quota — no userspace spin loop needed.
-const EPOLL_IDLE_US: i64 = 60;
+const EPOLL_IDLE_US: i64 = 30;
 
 // Edge-triggered flags
 const CLIENT_EVENTS: u32 = (libc::EPOLLIN | libc::EPOLLRDHUP | libc::EPOLLET) as u32;
 const CLIENT_WRITE_EVENTS: u32 =
     (libc::EPOLLIN | libc::EPOLLOUT | libc::EPOLLRDHUP | libc::EPOLLET) as u32;
 const CTRL_EVENTS: u32 = (libc::EPOLLIN | libc::EPOLLRDHUP | libc::EPOLLET) as u32;
-
-// epoll busy-poll params (Linux 6.9+)
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-struct EpollParams {
-    busy_poll_usecs: u32,
-    busy_poll_budget: u16,
-    prefer_busy_poll: u8,
-    _pad: u8,
-}
-
-const EPIOCSPARAMS: libc::c_ulong = 0x40088A01;
-const EPIOCGPARAMS: libc::c_ulong = 0x80088A02;
 
 struct Conn {
     buf: [u8; BUF_CAP],
@@ -82,7 +67,6 @@ static mut EPFD: RawFd = -1;
 static mut INDEX_PTR: *const Index = std::ptr::null();
 static mut URING: Option<IoUring> = None;
 static mut URING_PENDING: u32 = 0;
-
 /// Initialize io_uring ring. Falls back to direct send if unsupported.
 unsafe fn init_uring() {
     match IoUring::new(256) {
@@ -122,8 +106,7 @@ unsafe fn uring_send_close(fd: RawFd, buf: *const u8, len: usize) -> bool {
         .flags(io_uring::squeue::Flags::IO_LINK);
 
     // CLOSE SQE
-    let close_e = opcode::Close::new(types::Fd(fd))
-        .build();
+    let close_e = opcode::Close::new(types::Fd(fd)).build();
 
     let _ = sq.push(&send_e);
     let _ = sq.push(&close_e);
@@ -150,23 +133,6 @@ unsafe fn uring_flush() {
     }
 }
 
-fn env_us(key: &str, default: u32) -> u32 {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
-
-fn env_truthy(key: &str) -> bool {
-    std::env::var(key)
-        .ok()
-        .map(|v| {
-            let v = v.trim();
-            v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
-        })
-        .unwrap_or(false)
-}
-
 unsafe fn pool_pop() -> Option<*mut Conn> {
     if CONN_POOL_LEN == 0 {
         return None;
@@ -185,100 +151,18 @@ unsafe fn pool_push(c: *mut Conn) {
 }
 
 fn configure_epoll_params() {
-    let requested = env_truthy("EPOLL_BUSY_POLL");
-    if !requested {
-        perf::set_epoll_busy_poll_result(false, false, 0, 0, 0, 0, 0);
-        eprintln!("epoll busy_poll=disabled timeout={EPOLL_TIMEOUT_MS}ms");
-        return;
-    }
-
-    let profile = std::env::var("EPOLL_BUSY_POLL_PROFILE")
-        .unwrap_or_else(|_| "B".to_string())
-        .to_ascii_uppercase();
-    let (default_usecs, default_budget) = match profile.as_str() {
-        "A" => (10, 4),
-        "B" => (25, 8),
-        "C" => (50, 16),
-        "D" => (100, 32),
-        _ => (25, 8),
-    };
-    let busy_poll = env_us("EPOLL_BUSY_POLL_US", default_usecs);
-    let budget = env_us("EPOLL_BUSY_POLL_BUDGET", default_budget) as u16;
-    unsafe {
-        let params = EpollParams {
-            busy_poll_usecs: busy_poll,
-            busy_poll_budget: budget,
-            prefer_busy_poll: 1,
-            _pad: 0,
-        };
-        let ret = libc::ioctl(EPFD, EPIOCSPARAMS, &params as *const EpollParams);
-        if ret < 0 {
-            let errno = *libc::__errno_location();
-            perf::set_epoll_busy_poll_result(false, false, 0, 0, 0, errno, 0);
-            eprintln!(
-                "EPIOCSPARAMS unsupported, continuing without epoll busy poll: {}",
-                std::io::Error::from_raw_os_error(errno)
-            );
-            return;
-        }
-
-        let mut actual = EpollParams::default();
-        let get_ret = libc::ioctl(EPFD, EPIOCGPARAMS, &mut actual as *mut EpollParams);
-        if get_ret < 0 {
-            let errno = *libc::__errno_location();
-            perf::set_epoll_busy_poll_result(false, false, 0, 0, 0, 0, errno);
-            eprintln!(
-                "EPIOCGPARAMS unsupported, continuing without epoll busy poll validation: {}",
-                std::io::Error::from_raw_os_error(errno)
-            );
-            return;
-        }
-
-        let applied = actual.busy_poll_usecs == busy_poll
-            && actual.busy_poll_budget == budget
-            && actual.prefer_busy_poll == 1;
-        perf::set_epoll_busy_poll_result(
-            applied,
-            applied,
-            actual.busy_poll_usecs,
-            actual.busy_poll_budget,
-            actual.prefer_busy_poll,
-            0,
-            0,
-        );
-        if !applied {
-            eprintln!(
-                "kernel ignored EPIOCSPARAMS, continuing without epoll busy poll: requested usecs={busy_poll} budget={budget} prefer=1, got usecs={} budget={} prefer={}",
-                actual.busy_poll_usecs, actual.busy_poll_budget, actual.prefer_busy_poll
-            );
-            return;
-        }
-        eprintln!(
-            "epoll busy_poll={}us budget={} prefer={} timeout={}ms",
-            actual.busy_poll_usecs,
-            actual.busy_poll_budget,
-            actual.prefer_busy_poll,
-            EPOLL_TIMEOUT_MS
-        );
-    }
+    perf::set_epoll_busy_poll_result(false, false, 0, 0, 0, 0, 0);
+    eprintln!("epoll busy_poll=disabled timeout={EPOLL_TIMEOUT_MS}ms");
 }
 
 /// epoll_pwait2 com timeout em microsegundos.
-/// Não faz spin loop em userspace — kernel busy poll (EPIOCSPARAMS) cuida disso
-/// sem queimar CPU quota.
 #[inline]
 unsafe fn epoll_wait_us(events: *mut libc::epoll_event, max_events: i32, timeout_us: i64) -> i32 {
     let timeout = libc::timespec {
         tv_sec: timeout_us / 1_000_000,
         tv_nsec: (timeout_us % 1_000_000) * 1_000,
     };
-    let n = libc::epoll_pwait2(
-        EPFD,
-        events,
-        max_events,
-        &timeout,
-        std::ptr::null(),
-    );
+    let n = libc::epoll_pwait2(EPFD, events, max_events, &timeout, std::ptr::null());
     if n >= 0 {
         return n;
     }
@@ -394,7 +278,9 @@ pub fn run_direct(index: Arc<Index>, port: u16) -> anyhow::Result<()> {
         libc::epoll_ctl(EPFD, libc::EPOLL_CTL_ADD, tcp_fd, &mut ev);
 
         init_uring();
-        run_warmup();
+        if let Some(index) = INDEX_PTR.as_ref() {
+            run_warmup(index);
+        }
         crate::perf::reset();
         event_loop_direct(tcp_fd);
     }
@@ -479,7 +365,6 @@ unsafe fn accept_tcp_clients(tcp_fd: RawFd) {
             &one as *const _ as *const _,
             4,
         );
-
 
         let c = get_conn(client_fd);
         if c.is_null() {
@@ -629,7 +514,9 @@ pub fn run(sock_path: &Path, index: Arc<Index>, health_port: u16) -> anyhow::Res
         libc::epoll_ctl(EPFD, libc::EPOLL_CTL_ADD, health_fd, &mut ev);
 
         init_uring();
-        run_warmup();
+        if let Some(index) = INDEX_PTR.as_ref() {
+            run_warmup(index);
+        }
         crate::perf::reset();
         event_loop(ctrl_listen_fd, health_fd);
     }
@@ -767,8 +654,8 @@ unsafe fn accept_from_lb(ctrl: RawFd) {
             continue;
         }
 
-        // TCP_NODELAY+QUICKACK já aplicados no LB antes do fd-passing.
-        // Nenhum setsockopt necessário aqui — elimina ~5-10μs do hot path.
+        // O LB entrega o fd sem setsockopt por conexão; a resposta é curta e
+        // fecha a conexão, então evitamos dois syscalls no caminho quente.
 
         let c = get_conn(client_fd);
         if c.is_null() {
@@ -777,14 +664,12 @@ unsafe fn accept_from_lb(ctrl: RawFd) {
         }
         (*c).request_start = perf::stage_start();
 
-        // Spin-read: try recv up to 32 times before falling back to epoll.
-        // With TCP_DEFER_ACCEPT on the LB, data is usually already in the
-        // kernel buffer — but timing jitter from fd-passing may delay it by
-        // a few microseconds. Spinning here avoids a costly epoll round-trip.
+        // Spin-read briefly before falling back to epoll; fd passing can beat
+        // the payload by a few microseconds on localhost.
         let mut got_data = false;
         let mut attempts = 0u64;
         let spin_start = perf::stage_start();
-        for _ in 0..32 {
+        for _ in 0..FD_PASS_SPIN_READ_ATTEMPTS {
             attempts += 1;
             perf::recv_call();
             let n = libc::recv(client_fd, (*c).buf.as_mut_ptr() as *mut _, BUF_CAP, 0);
@@ -1235,7 +1120,7 @@ unsafe fn send_and_close(fd: RawFd, resp: &[u8]) {
 #[inline]
 fn fraud_response(body: &[u8]) -> (&'static [u8], bool) {
     match extract(body) {
-        Some(mut p) => {
+        Some(p) => {
             let cache_start = perf::stage_start();
             let fast_count = try_fast_fraud_count(&p);
             perf::record_stage(perf::STAGE_CACHE_LOOKUP, cache_start);
@@ -1247,10 +1132,20 @@ fn fraud_response(body: &[u8]) -> (&'static [u8], bool) {
                 return (resp, true);
             }
             perf::cache_miss();
+
             let decision_start = perf::stage_start();
-            complete_cache(&mut p);
-            let count = tier_gray_count(&p);
-            perf::record_stage(perf::STAGE_DECISION_TREE, decision_start);
+            let count = unsafe {
+                let index = INDEX_PTR.as_ref();
+                match index.and_then(|idx| vectorize_payload(idx, &p).map(|q| fraud_count(idx, &q)))
+                {
+                    Some(count) => count,
+                    None => {
+                        perf::record_stage(perf::STAGE_KNN_SEARCH, decision_start);
+                        return (response::RESP_DENIED_S10, false);
+                    }
+                }
+            };
+            perf::record_stage(perf::STAGE_KNN_SEARCH, decision_start);
             let serialize_start = perf::stage_start();
             let resp = response::for_count(count);
             perf::record_stage(perf::STAGE_SERIALIZE, serialize_start);

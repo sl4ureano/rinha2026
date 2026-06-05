@@ -230,7 +230,7 @@ export function buildJsonBraces(accent = 0x22d3ee) {
   return { group: g, primary: core };
 }
 
-/** CPU / chip — tier_score */
+/** CPU / chip */
 export function buildCpuChip(accent = 0xa855f7) {
   const g = new THREE.Group();
   const die = new THREE.Mesh(
@@ -327,53 +327,7 @@ export function buildAlert(accent = 0xef4444) {
   return { group: g, primary: tri };
 }
 
-/** Árvore de decisão — grafo neural */
-export function buildDecisionGraph(accent = 0xa855f7) {
-  const g = new THREE.Group();
-  const nodeMat = ledMat(accent, 1.8);
-  const edgeMat = new THREE.LineBasicMaterial({
-    color: accent,
-    transparent: true,
-    opacity: 0.6,
-  });
-  const layers = [
-    [{ x: 0, y: 0.5 }],
-    [{ x: -0.35, y: 0.15 }, { x: 0.35, y: 0.15 }],
-    [{ x: -0.5, y: -0.25 }, { x: 0, y: -0.25 }, { x: 0.5, y: -0.25 }],
-    [{ x: -0.25, y: -0.55 }, { x: 0.25, y: -0.55 }],
-  ];
-  const nodes = [];
-  for (const layer of layers) {
-    for (const p of layer) {
-      const n = new THREE.Mesh(new THREE.SphereGeometry(0.09, 12, 12), nodeMat);
-      n.position.set(p.x, p.y, 0);
-      g.add(n);
-      nodes.push(n);
-    }
-  }
-  const edges = [
-    [0, 1], [0, 2], [1, 3], [1, 4], [2, 4], [2, 5], [3, 6], [4, 6], [4, 7], [5, 7],
-  ];
-  const positions = [];
-  const flat = layers.flat();
-  for (const [a, b] of edges) {
-    const pa = flat[a];
-    const pb = flat[b];
-    positions.push(pa.x, pa.y, 0, pb.x, pb.y, 0);
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  g.add(new THREE.LineSegments(geo, edgeMat));
-  const board = new THREE.Mesh(
-    new RoundedBoxGeometry(1.1, 1.2, 0.08, 3, 0.02),
-    techDark(0x1e1b4b),
-  );
-  board.position.z = -0.08;
-  g.add(board);
-  return { group: g, primary: nodes[0] };
-}
-
-/** Ratio — medidor / gauge */
+/** Medidor / gauge */
 export function buildGauge(accent = 0xf97316) {
   const g = new THREE.Group();
   const base = new THREE.Mesh(

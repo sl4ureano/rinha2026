@@ -1,11 +1,12 @@
 //! Boot warmup: prime CPU caches and branch predictors before accepting traffic.
 
-use crate::ingest::extract;
-use crate::search::{complete_cache, tier_gray_count, try_fast_fraud_count};
+use crate::index::Index;
+use crate::ingest::{extract, vectorize_payload};
+use crate::search::fraud_count;
 
-const DEFAULT_WARMUP: usize = 4096;
+const WARMUP_QUERIES: usize = 8192;
 
-/// Representative payloads: obvious legit, obvious fraud, gray (tree/ratio).
+/// Representative payloads: safe fast path and non-safe k-NN queries.
 const BODIES: &[&[u8]] = &[
     br#"{"id":"w1","transaction":{"amount":41.12,"installments":2,"requested_at":"2026-03-11T18:45:53Z"},"customer":{"avg_amount":82.24,"tx_count_24h":3,"known_merchants":["MERC-003","MERC-016"]},"merchant":{"id":"MERC-016","mcc":"5411","avg_amount":60.25},"terminal":{"is_online":false,"card_present":true,"km_from_home":29.2},"last_transaction":null}"#,
     br#"{"id":"w2","transaction":{"amount":9500.0,"installments":6,"requested_at":"2026-03-11T02:15:00Z"},"customer":{"avg_amount":120.0,"tx_count_24h":8,"known_merchants":[]},"merchant":{"id":"MERC-UNK","mcc":"7995","avg_amount":500.0},"terminal":{"is_online":true,"card_present":false,"km_from_home":200.0},"last_transaction":null}"#,
@@ -13,16 +14,9 @@ const BODIES: &[&[u8]] = &[
     br#"{"id":"w4","transaction":{"amount":250.0,"installments":1,"requested_at":"2026-03-11T09:00:00Z"},"customer":{"avg_amount":500.0,"tx_count_24h":2,"known_merchants":["MERC-010"]},"merchant":{"id":"MERC-010","mcc":"5812","avg_amount":45.0},"terminal":{"is_online":false,"card_present":true,"km_from_home":5.0},"last_transaction":null}"#,
 ];
 
-fn warmup_count() -> usize {
-    std::env::var("WARMUP_QUERIES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_WARMUP)
-}
-
-/// Run `WARMUP_QUERIES` (default 4096) scoring iterations before serving.
-pub fn run_warmup() {
-    let n = warmup_count();
+/// Run representative scoring iterations before serving.
+pub fn run_warmup(index: &Index) {
+    let n = WARMUP_QUERIES;
     if n == 0 {
         return;
     }
@@ -30,12 +24,10 @@ pub fn run_warmup() {
     for i in 0..n {
         let body = BODIES[i % bodies];
         if let Some(p) = extract(body) {
-            let mut p = p;
-            complete_cache(&mut p);
-            if try_fast_fraud_count(&p).is_none() {
-                let _ = tier_gray_count(&p);
+            if let Some(q) = vectorize_payload(index, &p) {
+                let _ = fraud_count(index, &q);
             }
         }
     }
-    eprintln!("warmup: {n} queries");
+    eprintln!("warmup: {n} knn queries");
 }

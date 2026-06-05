@@ -9,24 +9,19 @@ path = "src/lib.rs"
 
 [features]
 default = ["submission"]
-# Imagem Docker / Rinha: tier + fd_gateway + k-NN (hybrid scoring).
+# Imagem Docker / Rinha: fast path conservador + k-NN exato.
 submission = ["knn-index"]
-# Ferramentas e modo TCP com índice mmap.
 knn-index = ["dep:memmap2"]
-monoio-http = ["dep:monoio", "dep:socket2", "knn-index"]
 
 [dependencies]
 libc = "0.2"
 io-uring = "0.6"
-monoio = { version = "0.2", features = ["legacy", "macros"], optional = true }
 memmap2 = { version = "0.9", optional = true }
 anyhow = "1"
-socket2 = { version = "0.5", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 flate2 = "1"
 ureq = "2"
-backtrace = "0.3.76"
 hostname = "0.4.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -55,40 +50,9 @@ path = "src/bin/verify_fast.rs"
 required-features = ["knn-index"]
 
 [[bin]]
-name = "verify-tier"
-path = "src/bin/verify_tier.rs"
-
-[[bin]]
-name = "verify-fast-tier"
-path = "src/bin/verify_fast_tier.rs"
-
-[[bin]]
-name = "analyze-fast-expand"
-path = "src/bin/analyze_fast_expand.rs"
-
-[[bin]]
-name = "analyze-tree-ratio"
-path = "src/bin/analyze_tree_ratio.rs"
-
-[[bin]]
-name = "analyze-tree-split"
-path = "src/bin/analyze_tree_split.rs"
-
-[[bin]]
-name = "tier-paths"
-path = "src/bin/tier_paths.rs"
-
-[[bin]]
-name = "verify-tier-raw"
-path = "src/bin/verify_tier_raw.rs"
-
-[[bin]]
-name = "verify-c-parity"
-path = "src/bin/verify_c_parity.rs"
-
-[[bin]]
-name = "export-tier-counts"
-path = "src/bin/export_tier_counts.rs"
+name = "verify-knn-hot"
+path = "src/bin/verify_knn_hot.rs"
+required-features = ["knn-index"]
 
 [profile.release]
 opt-level = 3

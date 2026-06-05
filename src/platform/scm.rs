@@ -1,11 +1,6 @@
 //! Unix domain sockets and `SCM_RIGHTS` file-descriptor passing.
 
-use std::cell::RefCell;
 use std::os::fd::RawFd;
-
-thread_local! {
-    static CMSG_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::new());
-}
 
 pub fn connect_unix_retry(path: &str) -> RawFd {
     loop {
@@ -80,51 +75,50 @@ pub fn send_fd(ctrl_fd: RawFd, client_fd: RawFd) -> bool {
         iov_base: &byte as *const _ as *mut _,
         iov_len: 1,
     };
+    let mut cmsg_buf = [0u8; 64];
     let cmsg_space =
         unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as libc::c_uint) as usize };
+    if cmsg_space > cmsg_buf.len() {
+        return false;
+    }
 
-    CMSG_BUF.with(|cell| {
-        let mut cmsg_buf = cell.borrow_mut();
-        if cmsg_buf.len() < cmsg_space {
-            cmsg_buf.resize(cmsg_space, 0);
-        }
-        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    unsafe {
+        let mut msg: libc::msghdr = std::mem::zeroed();
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
         msg.msg_control = cmsg_buf.as_mut_ptr() as *mut _;
-        msg.msg_controllen = cmsg_buf.len();
-        unsafe {
-            let cmsg = libc::CMSG_FIRSTHDR(&msg);
-            if cmsg.is_null() {
-                return false;
-            }
-            (*cmsg).cmsg_level = libc::SOL_SOCKET;
-            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-            (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as _;
-            std::ptr::copy_nonoverlapping(
-                &client_fd as *const RawFd as *const u8,
-                libc::CMSG_DATA(cmsg),
-                std::mem::size_of::<RawFd>(),
-            );
-            msg.msg_controllen = (*cmsg).cmsg_len;
-            loop {
-                let n = libc::sendmsg(ctrl_fd, &msg, libc::MSG_NOSIGNAL);
-                if n == 1 {
-                    return true;
-                }
-                if n < 0 {
-                    let e = std::io::Error::last_os_error();
-                    if e.kind() == std::io::ErrorKind::Interrupted {
-                        continue;
-                    }
-                    if e.raw_os_error() == Some(libc::EPIPE) {
-                        return false;
-                    }
-                }
-                return false;
-            }
+        msg.msg_controllen = cmsg_space;
+
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        if cmsg.is_null() {
+            return false;
         }
-    })
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as _;
+        std::ptr::copy_nonoverlapping(
+            &client_fd as *const RawFd as *const u8,
+            libc::CMSG_DATA(cmsg),
+            std::mem::size_of::<RawFd>(),
+        );
+        msg.msg_controllen = (*cmsg).cmsg_len;
+        loop {
+            let n = libc::sendmsg(ctrl_fd, &msg, libc::MSG_NOSIGNAL);
+            if n == 1 {
+                return true;
+            }
+            if n < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if e.raw_os_error() == Some(libc::EPIPE) {
+                    return false;
+                }
+            }
+            return false;
+        }
+    }
 }
 
 pub fn write_502(fd: RawFd) {
