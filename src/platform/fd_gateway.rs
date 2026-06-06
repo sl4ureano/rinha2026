@@ -19,12 +19,12 @@ use io_uring::{opcode, types, IoUring};
 const MAX_FDS: usize = 8192;
 const MAX_EVENTS: i32 = 512;
 const BUF_CAP: usize = 8192;
-const CONN_POOL_CAP: usize = 256;
+const CONN_POOL_CAP: usize = 512;
 const FD_PASS_SPIN_READ_ATTEMPTS: usize = 32;
 const CTRL_LISTEN_TOKEN: u64 = u64::MAX;
 const TCP_LISTEN_TOKEN: u64 = u64::MAX - 1;
 const HEALTH_LISTEN_TOKEN: u64 = u64::MAX - 2;
-const EPOLL_TIMEOUT_MS: i32 = 1;
+const EPOLL_TIMEOUT_MS: i32 = -1;
 /// epoll_pwait2 timeout in microseconds (replaces 1ms epoll_wait).
 const EPOLL_IDLE_US: i64 = 30;
 
