@@ -1,4 +1,5 @@
-//! Single-thread blocking-accept load balancer with multiple upstreams.
+/// Single-thread TCP load balancer that accepts client sockets and forwards
+/// them to one of several upstream API workers via SCM_RIGHTS.
 
 use std::os::fd::RawFd;
 
@@ -153,6 +154,7 @@ pub fn run(cfg: LbConfig) {
     }
 }
 
+#[inline(always)]
 fn tcp_listen(port: u16) -> std::io::Result<RawFd> {
     let sock = unsafe {
         libc::socket(
@@ -187,6 +189,18 @@ fn tcp_listen(port: u16) -> std::io::Result<RawFd> {
             &one as *const _ as *const _,
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         );
+        // Enable SO_BUSY_POLL (kernel socket polling for lower latency)
+        let busy_poll_us: u32 = 100;  // 100 microseconds
+        let ret = libc::setsockopt(
+            sock,
+            libc::SOL_SOCKET,
+            libc::SO_BUSY_POLL,
+            &busy_poll_us as *const _ as *const _,
+            std::mem::size_of::<u32>() as libc::socklen_t,
+        );
+        if ret == 0 {
+            eprintln!("SO_BUSY_POLL=100us activated on port {}", port);
+        }
         // Increase SO_SNDBUF on the control sockets for smoother FD passing
         let sndbuf: libc::c_int = 262144;
         libc::setsockopt(

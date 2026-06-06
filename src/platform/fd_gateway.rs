@@ -1,6 +1,5 @@
-//! Epoll-based event-driven FD gateway: LB envia TCP FDs via SCM_RIGHTS;
-//! single-threaded epoll loop processes all connections without spawning threads.
-//! Uses io_uring for batched send+close operations (reduces syscalls per request).
+//! Linux FD gateway. Receives TCP sockets from the load balancer via SCM_RIGHTS
+//! and handles requests in a single-threaded epoll loop.
 #![allow(static_mut_refs)]
 
 use std::os::unix::io::RawFd;
@@ -243,12 +242,6 @@ unsafe fn uring_close(fd: RawFd) {
     libc::close(fd);
 }
 
-#[inline]
-unsafe fn socket_write(fd: RawFd, ptr: *const u8, len: usize) -> isize {
-    // send com MSG_NOSIGNAL evita SIGPIPE e é equivalent a write para TCP
-    libc::send(fd, ptr as *const _, len, libc::MSG_NOSIGNAL) as isize
-}
-
 /// Direct TCP mode: server listens on TCP port directly (no LB, no fd-passing).
 pub fn run_direct(index: Arc<Index>, port: u16) -> anyhow::Result<()> {
     unsafe {
@@ -292,7 +285,20 @@ unsafe fn event_loop_direct(tcp_fd: RawFd) -> ! {
 
     loop {
         let wait_start = perf::stage_start();
-        let nfds = epoll_wait_us(events.as_mut_ptr(), MAX_EVENTS, EPOLL_IDLE_US);
+        // Spin-read: try non-blocking epoll_wait a few times before sleeping.
+        // This reduces syscall latency on bursty traffic.
+        const SPIN_ATTEMPTS: usize = 32;
+        let mut nfds = 0;
+        for _ in 0..SPIN_ATTEMPTS {
+            nfds = libc::epoll_wait(EPFD, events.as_mut_ptr(), MAX_EVENTS, 0);
+            if nfds > 0 {
+                break;
+            }
+            std::hint::spin_loop();
+        }
+        if nfds <= 0 {
+            nfds = epoll_wait_us(events.as_mut_ptr(), MAX_EVENTS, EPOLL_IDLE_US);
+        }
         perf::record_epoll_wait(wait_start, nfds);
         if nfds < 0 {
             continue;
@@ -357,6 +363,15 @@ unsafe fn accept_tcp_clients(tcp_fd: RawFd) {
             libc::TCP_NODELAY,
             &one as *const _ as *const _,
             4,
+        );
+        // Enable TCP_QUICKACK to reduce delayed ACK latency on short exchanges
+        let quick_ack: libc::c_int = 1;
+        let _ = libc::setsockopt(
+            client_fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_QUICKACK,
+            &quick_ack as *const _ as *const _,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         );
         libc::setsockopt(
             client_fd,
@@ -606,10 +621,11 @@ unsafe fn accept_health_clients(health_fd: RawFd) {
         let mut buf = [0u8; 256];
         let n = libc::recv(client_fd, buf.as_mut_ptr() as *mut _, buf.len(), 0);
         if n > 0 && buf[..n as usize].windows(6).any(|w| w == b"/ready") {
-            let _ = socket_write(
+            let _ = libc::send(
                 client_fd,
-                response::RESP_READY.as_ptr(),
+                response::RESP_READY.as_ptr() as *const _,
                 response::RESP_READY.len(),
+                libc::MSG_NOSIGNAL,
             );
         }
         libc::close(client_fd);
@@ -729,7 +745,18 @@ unsafe fn try_process_request(fd: RawFd, c: *mut Conn) -> bool {
                 None => {
                     perf::record_stage(perf::STAGE_HTTP_PARSE, http_start);
                     perf::record_stage(perf::STAGE_VALIDATION, validation_start);
-                    send_response_inline(fd, response::RESP_DENIED_S10);
+                    perf::send_call();
+                    let sent = libc::send(
+                        fd,
+                        response::RESP_DENIED_S10.as_ptr() as *const _,
+                        response::RESP_DENIED_S10.len(),
+                        libc::MSG_NOSIGNAL,
+                    );
+                    perf::record_stage(perf::STAGE_WRITE_RESPONSE, None);
+                    if sent > 0 {
+                        perf::add_bytes_sent(sent as usize);
+                        perf::record_stage(perf::STAGE_WRITE_COMPLETE, None);
+                    }
                     finish_request(c, current_request_start(c, processing_start), false);
                     return true;
                 }
@@ -747,7 +774,12 @@ unsafe fn try_process_request(fd: RawFd, c: *mut Conn) -> bool {
             // Try to send inline
             let write_start = perf::stage_start();
             perf::send_call();
-            let sent = socket_write(fd, resp.as_ptr(), resp.len());
+            let sent = libc::send(
+                fd,
+                resp.as_ptr() as *const _,
+                resp.len(),
+                libc::MSG_NOSIGNAL,
+            );
             perf::record_stage(perf::STAGE_WRITE_RESPONSE, write_start);
             if sent as usize == resp.len() {
                 perf::add_bytes_sent(sent as usize);
@@ -819,14 +851,33 @@ unsafe fn try_process_request(fd: RawFd, c: *mut Conn) -> bool {
         perf::record_stage(perf::STAGE_HTTP_PARSE, http_start);
         if buf.len() >= 10 && &buf[..3] == b"GET" {
             perf::record_stage(perf::STAGE_VALIDATION, validation_start);
-            send_response_inline(fd, response::RESP_READY);
-            finish_request(c, current_request_start(c, processing_start), true);
-            epoll_arm(fd, (libc::EPOLLIN | libc::EPOLLRDHUP) as u32);
-            return true;
+                perf::send_call();
+                let sent = libc::send(
+                    fd,
+                    response::RESP_READY.as_ptr() as *const _,
+                    response::RESP_READY.len(),
+                    libc::MSG_NOSIGNAL,
+                );
+                perf::record_stage(perf::STAGE_WRITE_RESPONSE, None);
+                if sent > 0 {
+                    perf::add_bytes_sent(sent as usize);
+                    perf::record_stage(perf::STAGE_WRITE_COMPLETE, None);
+                }
         }
 
         perf::record_stage(perf::STAGE_VALIDATION, validation_start);
-        send_response_inline(fd, response::RESP_NOT_FOUND);
+        perf::send_call();
+        let sent = libc::send(
+            fd,
+            response::RESP_NOT_FOUND.as_ptr() as *const _,
+            response::RESP_NOT_FOUND.len(),
+            libc::MSG_NOSIGNAL,
+        );
+        perf::record_stage(perf::STAGE_WRITE_RESPONSE, None);
+        if sent > 0 {
+            perf::add_bytes_sent(sent as usize);
+            perf::record_stage(perf::STAGE_WRITE_COMPLETE, None);
+        }
         drop_conn(fd);
         finish_request(c, current_request_start(c, processing_start), false);
         return true;
@@ -922,7 +973,32 @@ unsafe fn handle_client_read(fd: RawFd) {
                 None => {
                     perf::record_stage(perf::STAGE_HTTP_PARSE, http_start);
                     perf::record_stage(perf::STAGE_VALIDATION, validation_start);
-                    send_and_close(fd, response::RESP_DENIED_S10);
+                    {
+                        let resp = response::RESP_DENIED_S10;
+                        if uring_send_close(fd, resp.as_ptr(), resp.len()) {
+                            perf::send_call();
+                            perf::add_bytes_sent(resp.len());
+                            let idx = fd as usize;
+                            if idx < MAX_FDS && !CONNS[idx].is_null() {
+                                pool_push(CONNS[idx]);
+                                CONNS[idx] = std::ptr::null_mut();
+                                perf::connection_closed();
+                            }
+                            libc::epoll_ctl(EPFD, libc::EPOLL_CTL_DEL, fd, std::ptr::null_mut());
+                        } else {
+                            perf::send_call();
+                            let sent = libc::send(
+                                fd,
+                                resp.as_ptr() as *const _,
+                                resp.len(),
+                                libc::MSG_NOSIGNAL,
+                            );
+                            if sent > 0 {
+                                perf::add_bytes_sent(sent as usize);
+                            }
+                            drop_conn(fd);
+                        }
+                    }
                     finish_request(c, current_request_start(c, processing_start), false);
                     return;
                 }
@@ -939,7 +1015,12 @@ unsafe fn handle_client_read(fd: RawFd) {
 
             let write_start = perf::stage_start();
             perf::send_call();
-            let sent = socket_write(fd, resp.as_ptr(), resp.len());
+            let sent = libc::send(
+                fd,
+                resp.as_ptr() as *const _,
+                resp.len(),
+                libc::MSG_NOSIGNAL,
+            );
             perf::record_stage(perf::STAGE_WRITE_RESPONSE, write_start);
             if sent as usize == resp.len() {
                 perf::add_bytes_sent(sent as usize);
@@ -1009,7 +1090,12 @@ unsafe fn handle_client_read(fd: RawFd) {
             perf::record_stage(perf::STAGE_VALIDATION, validation_start);
             let write_start = perf::stage_start();
             perf::send_call();
-            let sent = socket_write(fd, resp.as_ptr(), resp.len());
+            let sent = libc::send(
+                fd,
+                resp.as_ptr() as *const _,
+                resp.len(),
+                libc::MSG_NOSIGNAL,
+            );
             perf::record_stage(perf::STAGE_WRITE_RESPONSE, write_start);
             if sent > 0 {
                 perf::add_bytes_sent(sent as usize);
@@ -1031,7 +1117,30 @@ unsafe fn handle_client_read(fd: RawFd) {
         } else {
             perf::record_stage(perf::STAGE_HTTP_PARSE, http_start);
             perf::record_stage(perf::STAGE_VALIDATION, validation_start);
-            send_and_close(fd, response::RESP_NOT_FOUND);
+            let resp = response::RESP_NOT_FOUND;
+            if uring_send_close(fd, resp.as_ptr(), resp.len()) {
+                perf::send_call();
+                perf::add_bytes_sent(resp.len());
+                let idx = fd as usize;
+                if idx < MAX_FDS && !CONNS[idx].is_null() {
+                    pool_push(CONNS[idx]);
+                    CONNS[idx] = std::ptr::null_mut();
+                    perf::connection_closed();
+                }
+                libc::epoll_ctl(EPFD, libc::EPOLL_CTL_DEL, fd, std::ptr::null_mut());
+            } else {
+                perf::send_call();
+                let sent = libc::send(
+                    fd,
+                    resp.as_ptr() as *const _,
+                    resp.len(),
+                    libc::MSG_NOSIGNAL,
+                );
+                if sent > 0 {
+                    perf::add_bytes_sent(sent as usize);
+                }
+                drop_conn(fd);
+            }
             finish_request(c, current_request_start(c, processing_start), false);
             return;
         }
@@ -1058,7 +1167,12 @@ unsafe fn handle_client_write(fd: RawFd) {
         }
         let write_start = perf::stage_start();
         perf::send_call();
-        let n = socket_write(fd, (*c).send_ptr.add((*c).send_off), remaining);
+        let n = libc::send(
+            fd,
+            (*c).send_ptr.add((*c).send_off) as *const _,
+            remaining,
+            libc::MSG_NOSIGNAL,
+        );
         perf::record_stage(perf::STAGE_WRITE_RESPONSE, write_start);
         if n > 0 {
             (*c).send_off += n as usize;
@@ -1084,38 +1198,6 @@ unsafe fn handle_client_write(fd: RawFd) {
     epoll_arm(fd, CLIENT_EVENTS);
 }
 
-#[inline]
-unsafe fn send_response_inline(fd: RawFd, resp: &[u8]) {
-    let write_start = perf::stage_start();
-    perf::send_call();
-    let sent = socket_write(fd, resp.as_ptr(), resp.len());
-    perf::record_stage(perf::STAGE_WRITE_RESPONSE, write_start);
-    if sent > 0 {
-        perf::add_bytes_sent(sent as usize);
-    }
-    perf::record_stage(perf::STAGE_WRITE_COMPLETE, write_start);
-}
-
-#[inline]
-unsafe fn send_and_close(fd: RawFd, resp: &[u8]) {
-    // Try io_uring path: batch send+close in one submission
-    if uring_send_close(fd, resp.as_ptr(), resp.len()) {
-        perf::send_call();
-        perf::add_bytes_sent(resp.len());
-        // Release conn state (fd will be closed by io_uring)
-        let idx = fd as usize;
-        if idx < MAX_FDS && !CONNS[idx].is_null() {
-            pool_push(CONNS[idx]);
-            CONNS[idx] = std::ptr::null_mut();
-            perf::connection_closed();
-        }
-        libc::epoll_ctl(EPFD, libc::EPOLL_CTL_DEL, fd, std::ptr::null_mut());
-        return;
-    }
-    // Fallback: direct send + close
-    send_response_inline(fd, resp);
-    drop_conn(fd);
-}
 
 #[inline]
 fn fraud_response(body: &[u8]) -> (&'static [u8], bool) {

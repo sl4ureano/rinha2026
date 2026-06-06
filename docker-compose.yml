@@ -9,6 +9,9 @@ services:
     cpuset: "2,3"
     ports:
       - "9999:9999"
+    cap_add:
+      - SYS_NICE
+      - NET_ADMIN
     depends_on:
       api1:
         condition: service_healthy
@@ -36,6 +39,8 @@ services:
     command: ["./server", "/tmp/sockets/api1.sock"]
     cpuset: "0"
     network_mode: "none"
+    cap_add:
+      - SYS_NICE
     healthcheck:
       test: ["CMD", "/app/healthcheck"]
       interval: 1s
@@ -62,6 +67,8 @@ services:
     command: ["./server", "/tmp/sockets/api2.sock"]
     cpuset: "1"
     network_mode: "none"
+    cap_add:
+      - SYS_NICE
     healthcheck:
       test: ["CMD", "/app/healthcheck"]
       interval: 1s

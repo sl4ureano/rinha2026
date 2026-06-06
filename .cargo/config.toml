@@ -1,0 +1,2 @@
+[build]
+rustflags = ["-C", "target-cpu=haswell", "-C", "target-feature=+avx2"]

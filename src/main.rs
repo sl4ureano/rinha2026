@@ -6,8 +6,12 @@ static GLOBAL: fraud_detector::perf::CountingAllocator<mimalloc::MiMalloc> =
     fraud_detector::perf::CountingAllocator(mimalloc::MiMalloc);
 
 fn main() {
+    fraud_detector::platform::allocator::set_malloc_tuning();
     let cfg = ServerConfig::from_args();
     fraud_detector::perf::init_from_env();
+
+    #[cfg(target_os = "linux")]
+    fraud_detector::platform::scheduler::set_realtime_priority(80);
 
     #[cfg(target_os = "linux")]
     {

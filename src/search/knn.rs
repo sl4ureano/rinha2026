@@ -109,16 +109,23 @@ impl Search {
 #[inline]
 pub fn fraud_count(index: &Index, query: &QueryVector) -> u8 {
     #[cfg(all(target_arch = "x86_64", not(debug_assertions)))]
-    {
-        return unsafe { fraud_count_avx2(index, query) };
+    unsafe {
+        fraud_count_avx2(index, query)
     }
+
     #[cfg(all(target_arch = "x86_64", debug_assertions))]
     {
         if is_x86_feature_detected!("avx2") {
-            return unsafe { fraud_count_avx2(index, query) };
+            unsafe { fraud_count_avx2(index, query) }
+        } else {
+            fraud_count_scalar(index, query)
         }
     }
-    fraud_count_scalar(index, query)
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        fraud_count_scalar(index, query)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -141,6 +148,10 @@ unsafe fn fraud_count_avx2(index: &Index, query: &QueryVector) -> u8 {
 
     if primary >= 0 {
         let root = read_partition_root(index, primary as usize);
+        // Prefetch root node bounds to warm node metadata before traversal
+        if root >= 0 {
+            prefetch_node_bounds(index, root as usize);
+        }
         search_node(index, root, 0, query, &q_pairs, &mut s, true);
     }
 
@@ -180,6 +191,9 @@ unsafe fn fraud_count_avx2(index: &Index, query: &QueryVector) -> u8 {
             break;
         }
         let root = read_partition_root(index, part_idx as usize);
+        if root >= 0 {
+            prefetch_node_bounds(index, root as usize);
+        }
         search_node(index, root, lb, query, &q_pairs, &mut s, true);
     }
 
@@ -311,6 +325,15 @@ unsafe fn scan_leaf(
             );
             _mm_prefetch(labels_ptr.add(next * LANES) as *const i8, _MM_HINT_T0);
         }
+        // also prefetch two blocks ahead when available
+        if b + 2 < blocks {
+            let next2 = block_idx + 2;
+            _mm_prefetch(
+                vectors_ptr.add(next2 * VECTOR_DIM * LANES) as *const i8,
+                _MM_HINT_T0,
+            );
+            _mm_prefetch(labels_ptr.add(next2 * LANES) as *const i8, _MM_HINT_T0);
+        }
         let labels_base = block_idx * LANES;
         let block_off_i16 = block_idx * VECTOR_DIM * LANES;
 
@@ -342,6 +365,10 @@ unsafe fn distance_block8(
     for p in 0..DIM_PAIRS {
         if p + 1 < DIM_PAIRS {
             _mm_prefetch(base.add((p + 1) * 2 * LANES) as *const i8, _MM_HINT_T0);
+        }
+        // prefetch one more pair ahead when available
+        if p + 2 < DIM_PAIRS {
+            _mm_prefetch(base.add((p + 2) * 2 * LANES) as *const i8, _MM_HINT_T0);
         }
         let even = _mm_loadu_si128(base.add(p * 2 * LANES) as *const __m128i);
         let odd = _mm_loadu_si128(base.add((p * 2 + 1) * LANES) as *const __m128i);
@@ -498,19 +525,12 @@ unsafe fn read_qv(p: *const u8) -> QueryVector {
     v
 }
 
-// ---------------------------------------------------------------------------
-// Scalar fallback (non-x86 hosts, e.g. local dev on arm64). Same algorithm,
-// scalar squared L2. Never enters production.
-// ---------------------------------------------------------------------------
-
 #[cfg(not(target_arch = "x86_64"))]
 fn fraud_count_scalar(_index: &Index, _query: &QueryVector) -> u8 {
-    // Production targets x86_64 + AVX2; non-x86 builds are for compile-check only.
     0
 }
 
-#[cfg(target_arch = "x86_64")]
-#[allow(dead_code)]
+#[cfg(all(target_arch = "x86_64", debug_assertions))]
 fn fraud_count_scalar(_index: &Index, _query: &QueryVector) -> u8 {
     0
 }
