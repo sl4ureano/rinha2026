@@ -148,3 +148,9 @@ npm start
 ```
 
 Por padrão ele chama `http://127.0.0.1:9999`.
+
+
+
+### Resultado Final Rinha 2026
+
+![Resultado Final Rinha 2026](resultado_final.jpeg)
